@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets - never commit
+.env
+
+# Generated output
+results/
+data/sp500_tickers.csv
+*.csv
+!examples/*.csv

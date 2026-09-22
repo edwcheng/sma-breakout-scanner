@@ -1,0 +1,13 @@
+# Core (required)
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+
+# Market data - Alpaca is the primary source
+alpaca-py>=0.40
+
+# Optional: no-API-key fallback data source
+yfinance>=0.2.50
+
+# Optional: --config file.yaml support
+PyYAML>=6.0

@@ -1,0 +1,36 @@
+{
+  "universe": "sp500",
+  "ticker_cache": "data/sp500_tickers.csv",
+  "data_source": "alpaca",
+  "source_kwargs": {},
+  "history_bars": 400,
+  "filters": [
+    {
+      "name": "sma_breakout",
+      "params": {
+        "fast": 20,
+        "slow": 50,
+        "lookback": 10,
+        "direction": "up",
+        "min_spread_pct": null,
+        "volume_lookback": 20,
+        "min_volume_ratio": null
+      }
+    },
+    {
+      "name": "above_sma",
+      "params": { "period": 200 }
+    },
+    {
+      "name": "min_price",
+      "params": { "min_price": 10.0 }
+    },
+    {
+      "name": "min_avg_volume",
+      "params": { "min_volume": 500000, "period": 20 }
+    }
+  ],
+  "output_csv": "results/breakouts.csv",
+  "show_failed": false,
+  "verbose": false
+}
