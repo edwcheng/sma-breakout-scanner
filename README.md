@@ -94,8 +94,52 @@ python3.11 main.py \
 python3.11 main.py --list-filters
 ```
 
-Or edit a config file and pass `--config scan.json`
-(generate one with `--save-config scan.json`).
+### Configuration file
+
+Every setting can live in a JSON file (YAML too, if `pyyaml` is installed)
+instead of flags. Start from [`examples/scan_config.json`](examples/scan_config.json),
+or generate one from the current flags:
+
+```bash
+python3.11 main.py --save-config scan.json   # writes config, then exits
+python3.11 main.py --config scan.json        # run it
+```
+
+**Precedence:** defaults → config file → CLI flags. Any flag you pass on the
+command line wins over the file, and a flag left unset leaves the file's value
+alone. So `--config` gives you a saved baseline you can still tweak per run:
+
+```bash
+python3.11 main.py --config scan.json --max-symbols 40   # quick smoke test
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `universe` | `"sp500"` \| `"file"` | where symbols come from |
+| `symbols_file` | string \| null | symbol file, when `universe: "file"` |
+| `ticker_cache` | string | local cache for the scraped S&P 500 list |
+| `refresh_tickers` | bool | re-scrape the constituent list, ignore cache |
+| `max_symbols` | int \| null | cap the universe (fast runs) |
+| `data_source` | string | `alpaca`, `yfinance`, `csv`, `synthetic` |
+| `source_kwargs` | object | extra constructor args for the source |
+| `history_bars` | int | daily bars fetched per symbol |
+| `filters` | array | the screen — see below |
+| `output_csv` | string \| null | CSV path for matches |
+| `html_output` | string \| null | standalone HTML report path |
+| `show_failed` | bool | also list rejected symbols and why |
+| `verbose` | bool | progress log + fetch errors |
+
+`filters` is an ordered list; **all** must pass for a symbol to match, and
+evaluation short-circuits on the first failure. Each entry is
+`{"name": ..., "params": {...}}`, where `params` keys are the filter's own
+arguments (same names as the table below). A `null` param means "no gate" —
+e.g. `"min_volume_ratio": null` reports the volume ratio without requiring one.
+
+Unknown top-level keys are rejected with an error rather than silently ignored,
+so typos fail loudly.
+
+> Note: `--symbols` (an explicit comma-separated list) is CLI-only — it has no
+> config-file equivalent.
 
 ### Built-in filters
 
