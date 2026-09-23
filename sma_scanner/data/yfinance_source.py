@@ -28,6 +28,24 @@ def _coerce_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return df[list(OHLCV_COLUMNS)].apply(pd.to_numeric, errors="coerce")
 
 
+def _resolve_close(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse Yahoo's "Adj Close" onto "Close" without duplicating it.
+
+    `auto_adjust=True` normally drops "Adj Close", but when the frame carries
+    both, a blind rename leaves two "Close" columns. `PriceFrame.close` then
+    returns a DataFrame instead of a Series and every indicator raises
+    "float() argument must be ... not 'Series'" - which the scanner records
+    per symbol as "skipped", so the whole scan silently reports no matches.
+    A real "Close" always wins; otherwise adopt the adjusted one.
+    """
+    if "Adj Close" in df.columns:
+        if "Close" in df.columns:
+            df = df.drop(columns="Adj Close")
+        else:
+            df = df.rename(columns={"Adj Close": "Close"})
+    return df
+
+
 class YFinanceSource(DataSource):
     name = "yfinance"
     supports_batching = True
@@ -81,7 +99,7 @@ class YFinanceSource(DataSource):
                 result.add_error(sym, "symbol missing from yfinance response")
                 continue
 
-            df = df.rename(columns={"Adj Close": "Close"})
+            df = _resolve_close(df)
             df = df.loc[:, [c for c in OHLCV_COLUMNS if c in df.columns]]
             if df.isna().all().all() or df.empty:
                 result.add_error(sym, "all-NaN series")

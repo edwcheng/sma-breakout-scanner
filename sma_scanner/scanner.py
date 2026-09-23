@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .config import ScanConfig
@@ -52,12 +53,27 @@ class SymbolResult:
 
 
 def _rank_value(sr: "SymbolResult", key: Optional[str]) -> Optional[float]:
-    """Numeric rank for one symbol, or None when the metric is missing."""
+    """Numeric rank for one symbol, or None when the metric is missing.
+
+    Dates are ranked by instant rather than rejected. `cross_date` is a real,
+    displayed metric, so letting it fall through to `float()` made
+    `--sort-by cross_date` rank every symbol as "missing" - i.e. sort
+    alphabetically, identically in both directions.
+    """
     if not key:
         return None
     value = sr.metrics.get(key)
     if value is None:
         return None
+    # pd.Timestamp subclasses datetime, so check the narrower type first.
+    if isinstance(value, datetime):
+        if value != value:  # NaT
+            return None
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return float(dt.timestamp())
+    if isinstance(value, date):
+        midnight = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+        return float(midnight.timestamp())
     try:
         f = float(value)
     except (TypeError, ValueError):

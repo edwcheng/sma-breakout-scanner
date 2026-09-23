@@ -36,6 +36,14 @@ class PriceFrame:
         missing = [c for c in OHLCV_COLUMNS if c not in self.df.columns]
         if missing:
             raise ValueError(f"{self.symbol}: PriceFrame missing columns {missing}")
+        # Duplicate labels make `df["Close"]` return a DataFrame rather than a
+        # Series, which breaks every indicator with a confusing float() error
+        # far from the real cause. Reject it here, next to the source.
+        dupes = sorted(set(self.df.columns[self.df.columns.duplicated()]))
+        if dupes:
+            raise ValueError(
+                f"{self.symbol}: PriceFrame has duplicate columns {dupes}"
+            )
         if not isinstance(self.df.index, pd.DatetimeIndex):
             raise TypeError(f"{self.symbol}: df index must be a DatetimeIndex")
         if len(self.df) == 0:

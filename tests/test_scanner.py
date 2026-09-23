@@ -11,7 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -29,7 +29,7 @@ from sma_scanner.data.etf_list import (  # noqa: E402
     fetch_most_traded_etfs,
     parse_most_traded,
 )
-from sma_scanner.data.yfinance_source import _coerce_ohlcv  # noqa: E402
+from sma_scanner.data.yfinance_source import _coerce_ohlcv, _resolve_close  # noqa: E402
 from sma_scanner.filters import available_filters  # noqa: E402
 from sma_scanner.filters.builtin import AboveSmaFilter, SmaBreakoutFilter  # noqa: E402
 from sma_scanner.indicators import (  # noqa: E402
@@ -216,8 +216,8 @@ class TestScannerIntegration(unittest.TestCase):
     def test_detects_engineered_breakouts(self):
         """End-to-end: only the symbols engineered to break out should match.
 
-        Pins the chain to sma_breakout alone - the default config also applies
-        the 200-day trend gate, which the synthetic downtrend fails.
+        Pins the chain to sma_breakout alone so this isolates crossover
+        detection from any other gate.
         """
         source = SyntheticSource(days=400, seed=11, breakout_symbols=["AAA", "CCC"])
         cfg = ScanConfig(filters=[{"name": "sma_breakout", "params": {}}])
@@ -230,6 +230,20 @@ class TestScannerIntegration(unittest.TestCase):
         for m in result.matches:
             self.assertIn("cross_date", m.metrics)
             self.assertIn("spread_pct", m.metrics)
+
+    def test_engineered_breakouts_survive_default_trend_gate(self):
+        """Regression: the engineered "V" must clear the default 200-day gate.
+
+        When the dip spanned the whole series it dragged the 200-day average
+        down to meet the recovering price, so price finished below its own
+        long-term trend and the default filter set matched nothing - the
+        offline demo looked broken unless the gate was removed by hand.
+        """
+        source = SyntheticSource(days=400, seed=11, breakout_symbols=["AAA", "CCC"])
+        cfg = ScanConfig()  # default: sma_breakout + above_sma(200)
+        result = Scanner(cfg, source=source).run(["AAA", "BBB", "CCC", "DDD"])
+
+        self.assertEqual(sorted(m.symbol for m in result.matches), ["AAA", "CCC"])
 
     def test_trend_gate_narrows_results(self):
         """Adding the 200-day gate must not widen the result set."""
@@ -292,6 +306,38 @@ class TestResultSorting(unittest.TestCase):
             res.results.append(sr)
         self.assertEqual([m.symbol for m in res.matches], ["B", "A"])
 
+    def _date_result(self, desc):
+        """Symbols whose alphabetical order differs from their date order."""
+        res = ScanResult(sort_by="cross_date", sort_desc=desc)
+        for sym, day in [("AAA", "2026-02-01"), ("ZZZ", "2026-09-01"), ("MMM", "2026-05-01")]:
+            sr = SymbolResult(symbol=sym)
+            sr.metrics["cross_date"] = pd.Timestamp(day)
+            res.results.append(sr)
+        return res
+
+    def test_date_metric_ranks_chronologically_descending(self):
+        """Regression: cross_date used to rank as "missing" -> alphabetical."""
+        res = self._date_result(desc=True)
+        self.assertEqual([m.symbol for m in res.matches], ["ZZZ", "MMM", "AAA"])
+
+    def test_date_metric_ranks_chronologically_ascending(self):
+        res = self._date_result(desc=False)
+        self.assertEqual([m.symbol for m in res.matches], ["AAA", "MMM", "ZZZ"])
+
+    def test_date_metric_is_not_alphabetical_in_both_directions(self):
+        # The tell-tale of the old bug: ascending and descending agreed.
+        desc = [m.symbol for m in self._date_result(True).matches]
+        asc = [m.symbol for m in self._date_result(False).matches]
+        self.assertEqual(desc, list(reversed(asc)))
+
+    def test_plain_date_object_ranks_too(self):
+        res = ScanResult(sort_by="cross_date", sort_desc=True)
+        for sym, d in [("EARLY", date(2026, 1, 1)), ("LATE", date(2026, 12, 1))]:
+            sr = SymbolResult(symbol=sym)
+            sr.metrics["cross_date"] = d
+            res.results.append(sr)
+        self.assertEqual([m.symbol for m in res.matches], ["LATE", "EARLY"])
+
 
 class TestEtfList(unittest.TestCase):
     """TradingView screener parsing + cache freshness rules."""
@@ -349,8 +395,9 @@ class TestEtfList(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = Path(tmp) / "etfs.csv"
             etf_list._write_cache(cache, ["SPY", "QQQ"])
+            # limit matches what the cache holds, so it can satisfy the request
             with mock.patch.object(etf_list, "_fetch_html") as fh:
-                out = fetch_most_traded_etfs(cache_path=cache, refresh_days=7)
+                out = fetch_most_traded_etfs(cache_path=cache, limit=2, refresh_days=7)
             fh.assert_not_called()
             self.assertEqual(out, ["SPY", "QQQ"])
 
@@ -377,6 +424,33 @@ class TestEtfList(unittest.TestCase):
             ):
                 out = fetch_most_traded_etfs(cache_path=cache, refresh=True)
             self.assertEqual(out, ["SPY"])
+
+    def test_cache_shorter_than_limit_triggers_rescrape(self):
+        """Regression: a 50-row cache silently satisfied `--etf-limit 100`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "etfs.csv"
+            etf_list._write_cache(cache, [f"OLD{i}" for i in range(50)])
+            warnings = []
+            html = self._html([("AMEX", f"NEW{i}") for i in range(120)])
+            with mock.patch.object(etf_list, "_fetch_html", return_value=html):
+                out = fetch_most_traded_etfs(
+                    cache_path=cache, limit=100, refresh_days=7,
+                    on_warning=warnings.append,
+                )
+            self.assertEqual(len(out), 100)
+            self.assertEqual(out[0], "NEW0")
+            self.assertTrue(any("re-scraping" in w for w in warnings))
+
+    def test_cache_at_or_above_limit_is_still_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "etfs.csv"
+            etf_list._write_cache(cache, [f"E{i}" for i in range(100)])
+            with mock.patch.object(etf_list, "_fetch_html") as fh:
+                out = fetch_most_traded_etfs(
+                    cache_path=cache, limit=50, refresh_days=7
+                )
+            fh.assert_not_called()
+            self.assertEqual(len(out), 50)
 
     def test_failed_refresh_falls_back_to_stale_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -562,6 +636,46 @@ class TestYFinanceNumericCoercion(unittest.TestCase):
         out = _coerce_ohlcv(df)
         self.assertTrue(pd.isna(out["Close"].iloc[0]))
         self.assertEqual(out["Close"].iloc[1], 2.0)
+
+
+class TestYFinanceCloseColumn(unittest.TestCase):
+    """Regression: a duplicate Close column silently killed the whole scan."""
+
+    @staticmethod
+    def _frame(columns):
+        idx = pd.date_range("2024-01-01", periods=5, freq="D")
+        return pd.DataFrame(
+            {c: [100.0 + i for i in range(5)] for c in columns}, index=idx
+        )
+
+    def test_real_close_wins_and_adj_close_is_dropped(self):
+        df = _resolve_close(self._frame(
+            ["Open", "High", "Low", "Close", "Adj Close", "Volume"]))
+        self.assertNotIn("Adj Close", df.columns)
+        self.assertEqual(list(df.columns).count("Close"), 1)
+
+    def test_adj_close_is_adopted_when_no_real_close(self):
+        df = _resolve_close(self._frame(["Open", "High", "Low", "Adj Close", "Volume"]))
+        self.assertIn("Close", df.columns)
+
+    def test_duplicate_close_would_have_broken_indicators(self):
+        """Documents the failure mode: frame.close must stay a Series."""
+        df = _resolve_close(self._frame(
+            ["Open", "High", "Low", "Close", "Adj Close", "Volume"]))
+        pf = PriceFrame(symbol="X", df=_coerce_ohlcv(df), source="yfinance")
+        self.assertIsInstance(pf.close, pd.Series)
+
+    def test_price_frame_rejects_duplicate_columns(self):
+        # Built from a list of rows: a dict comprehension would de-dupe names.
+        idx = pd.date_range("2024-01-01", periods=5, freq="D")
+        vals = [100.0 + i for i in range(5)]
+        df = pd.DataFrame(
+            [vals] * 6, index=["Open", "High", "Low", "Close", "Close", "Volume"],
+            columns=idx,
+        ).T
+        self.assertEqual(list(df.columns).count("Close"), 2)
+        with self.assertRaises(ValueError):
+            PriceFrame(symbol="X", df=df, source="probe")
 
 
 class TestFilterValidation(unittest.TestCase):

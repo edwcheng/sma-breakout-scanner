@@ -144,8 +144,17 @@ def fetch_most_traded_etfs(
             warn(f"ETF cache unreadable ({exc}); will re-scrape")
             cached, stamp = [], None
         age = _cache_age_days(stamp, now)
-        if cached and not refresh and age <= refresh_days:
+        fresh = bool(cached) and not refresh and age <= refresh_days
+        if fresh and len(cached) >= limit:
             return cached[:limit]
+        if fresh:
+            # Fresh but too short to satisfy the request - e.g. it was written
+            # by an earlier run with a smaller `--etf-limit`. Returning it would
+            # silently scan a smaller universe than the caller asked for.
+            warn(
+                f"ETF cache holds {len(cached)} tickers but {limit} were "
+                "requested; re-scraping"
+            )
 
     try:
         scraped = parse_most_traded(_fetch_html(), limit=limit)
