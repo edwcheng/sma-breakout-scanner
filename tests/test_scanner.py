@@ -31,7 +31,11 @@ from sma_scanner.data.etf_list import (  # noqa: E402
 )
 from sma_scanner.data.yfinance_source import _coerce_ohlcv, _resolve_close  # noqa: E402
 from sma_scanner.filters import available_filters  # noqa: E402
-from sma_scanner.filters.builtin import AboveSmaFilter, SmaBreakoutFilter  # noqa: E402
+from sma_scanner.filters.builtin import (  # noqa: E402
+    AboveSmaFilter,
+    MinPriceFilter,
+    SmaBreakoutFilter,
+)
 from sma_scanner.indicators import (  # noqa: E402
     IndicatorContext,
     detect_crossovers,
@@ -549,6 +553,41 @@ class TestRsiWarmup(unittest.TestCase):
         self.assertTrue(out.iloc[:14].isna().all())
         self.assertFalse(out.iloc[14:].isna().any())
 
+    def test_flat_series_is_neutral_not_overbought(self):
+        """Regression: a flat series scored 100 (maximally overbought).
+
+        With no losses the RSI formula returns 100, which marked a price
+        that never moved as the most overbought reading possible - so
+        `rsi_range(high=70)` rejected every flat name. A flat series is
+        neutral (50), not extreme.
+        """
+        out = rsi(pd.Series([100.0] * 30), 14)
+        self.assertAlmostEqual(out.iloc[-1], 50.0, places=6)
+
+    def test_one_up_move_then_flat_is_overbought_not_neutral(self):
+        """Only a series with *no* gain and *no* loss is neutral.
+
+        A single rise followed by flat prices has positive average gain and
+        zero average loss, so 100 is the correct RSI - this guards against
+        over-correcting the flat-series fix into "any zero loss is 50".
+        """
+        out = rsi(pd.Series([100.0] * 15 + [101.0] + [101.0] * 15), 14)
+        self.assertAlmostEqual(out.iloc[-1], 100.0, places=6)
+
+    def test_rsi_range_accepts_flat_price(self):
+        """The user-visible consequence of the flat-series bug."""
+        from sma_scanner.filters.builtin import RsiRangeFilter
+
+        closes = [100.0] * 60
+        idx = pd.date_range(end=pd.Timestamp("2024-06-01"), periods=60, freq="D")
+        df = pd.DataFrame(
+            {"Open": closes, "High": closes, "Low": closes,
+             "Close": closes, "Volume": [1_000_000.0] * 60},
+            index=idx,
+        )
+        ctx = IndicatorContext(PriceFrame(symbol="FLAT", df=df, source="test"))
+        self.assertTrue(RsiRangeFilter(low=0, high=70).evaluate(ctx).passed)
+
     def test_rising_series_is_100_after_warmup(self):
         out = rsi(pd.Series([100.0 + i for i in range(30)]), 14)
         self.assertEqual(out.iloc[-1], 100.0)
@@ -695,6 +734,75 @@ class TestFilterValidation(unittest.TestCase):
     def test_above_sma_rejects_zero_period(self):
         with self.assertRaises(ValueError):
             AboveSmaFilter(period=0)
+
+
+class TestNaNGates(unittest.TestCase):
+    """A NaN metric must FAIL a numeric gate, never silently clear it.
+
+    `nan < threshold` is False, so every bare `if value < threshold` gate
+    passed whenever the underlying number was unavailable - a liquidity or
+    price screen quietly admitting exactly the symbols it meant to exclude.
+    """
+
+    def _ctx(self, closes, volumes=None):
+        n = len(closes)
+        vols = volumes if volumes is not None else [1_000_000.0] * n
+        idx = pd.date_range(end=pd.Timestamp("2024-06-01"), periods=n, freq="D")
+        df = pd.DataFrame(
+            {"Open": closes, "High": closes, "Low": closes,
+             "Close": closes, "Volume": vols},
+            index=idx,
+        )
+        return IndicatorContext(PriceFrame(symbol="NAN", df=df, source="test"))
+
+    def test_min_price_fails_on_nan_price(self):
+        ctx = self._ctx([100.0, float("nan")])
+        self.assertFalse(MinPriceFilter(min_price=10.0).evaluate(ctx).passed)
+
+    def test_min_avg_volume_fails_on_all_nan_volume(self):
+        from sma_scanner.filters.builtin import MinAvgVolumeFilter
+
+        ctx = self._ctx([100.0] * 60, [float("nan")] * 60)
+        res = MinAvgVolumeFilter(min_volume=1_000_000, period=20).evaluate(ctx)
+        self.assertFalse(res.passed)
+        self.assertIn("unavailable", res.reason)
+
+    def test_min_spread_fails_when_spread_unavailable(self):
+        # A crossover exists, but with a one-bar series the spread cannot be
+        # computed - the required minimum must not be satisfied by NaN.
+        ctx = self._ctx([100.0] * 60 + [110.0] * 5)
+        f = SmaBreakoutFilter(fast=20, slow=50, lookback=10, min_spread_pct=1.0)
+        # sanity: a real spread still passes
+        self.assertTrue(f.evaluate(ctx).passed)
+        with mock.patch.object(
+            IndicatorContext, "spread_pct", return_value=float("nan")
+        ):
+            self.assertFalse(f.evaluate(ctx).passed)
+
+
+class TestVolumeWindow(unittest.TestCase):
+    """avg_volume must average the last N BARS, not the last N non-NaN values."""
+
+    def _ctx(self, volumes):
+        n = len(volumes)
+        closes = [100.0] * n
+        idx = pd.date_range(end=pd.Timestamp("2024-06-01"), periods=n, freq="D")
+        df = pd.DataFrame(
+            {"Open": closes, "High": closes, "Low": closes,
+             "Close": closes, "Volume": volumes},
+            index=idx,
+        )
+        return IndicatorContext(PriceFrame(symbol="GAP", df=df, source="test"))
+
+    def test_gap_does_not_pull_in_out_of_window_bars(self):
+        # Last 20 bars hold 18 NaN plus two 100s; the 30 leading 10s are
+        # OUTSIDE the window and must not enter the average.
+        vols = [10.0] * 30 + [float("nan")] * 18 + [100.0, 100.0]
+        self.assertAlmostEqual(self._ctx(vols).avg_volume(20), 100.0)
+
+    def test_fully_nan_window_is_nan(self):
+        vols = [10.0] * 30 + [float("nan")] * 20
+        self.assertTrue(pd.isna(self._ctx(vols).avg_volume(20)))
 
 
 class TestSyntheticOverride(unittest.TestCase):

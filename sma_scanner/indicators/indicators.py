@@ -30,13 +30,21 @@ def ema(series: pd.Series, period: int, *, adjust: bool = False) -> pd.Series:
 
 
 def avg_volume(volume: pd.Series, period: int) -> float:
-    """Mean share volume over the last `period` bars (scalar)."""
+    """Mean share volume over the last `period` bars (scalar).
+
+    The window is the last `period` *bars*, not the last `period` non-NaN
+    values. Dropping NaN before slicing silently reached back past the
+    window - a symbol with a gap in its volume series (halt, missing data)
+    would be measured against months-old bars. If the window holds no
+    usable value the result is NaN, and callers treat that as "unknown"
+    rather than substituting an out-of-window number.
+    """
     if len(volume) == 0:
         return float("nan")
-    tail = volume.dropna().tail(period)
-    if tail.empty:
+    window = volume.tail(period).dropna()
+    if window.empty:
         return float("nan")
-    return float(tail.mean())
+    return float(window.mean())
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -52,12 +60,17 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     # Warm-up bars (first period-1) have no average yet and must stay NaN -
     # reporting them as 100 would make a flat opening look overbought.
     warming_up = avg_loss.isna()
+    # No gain AND no loss means the price never moved: conventionally a
+    # neutral 50, not 100. Checking both is essential - a pure decline also
+    # has zero average gain, and only zero *loss* means "no weakness yet".
+    flat = avg_gain.eq(0.0) & avg_loss.eq(0.0)
     # Zero loss => RSI 100. Mask (rather than replace with pd.NA) to keep a
     # clean float dtype across pandas versions.
     avg_loss = avg_loss.mask(avg_loss == 0.0)
     rs = avg_gain / avg_loss
     out = 100.0 - (100.0 / (1.0 + rs))
     out = out.where(avg_loss.notna(), 100.0)
+    out = out.where(~flat, 50.0)
     out = out.where(~warming_up, float("nan"))
     return out.astype(float)
 

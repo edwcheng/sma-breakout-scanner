@@ -110,11 +110,18 @@ class SmaBreakoutFilter(Filter):
             )
 
         spread = ctx.spread_pct(self.fast, self.slow)
-        if self.min_spread_pct is not None and spread < self.min_spread_pct:
-            return self.fail(
-                f"spread {spread:.2f}% below required {self.min_spread_pct}%",
-                spread_pct=spread,
-            )
+        if self.min_spread_pct is not None:
+            # An unknown spread cannot satisfy a required minimum.
+            if pd.isna(spread):
+                return self.fail(
+                    f"spread unavailable (need >= {self.min_spread_pct}%)",
+                    spread_pct=float("nan"),
+                )
+            if spread < self.min_spread_pct:
+                return self.fail(
+                    f"spread {spread:.2f}% below required {self.min_spread_pct}%",
+                    spread_pct=spread,
+                )
 
         verb = "above" if self.direction == "up" else "below"
         # Volume on the breakout bar vs the average of the bars leading up
@@ -158,6 +165,9 @@ class MinPriceFilter(Filter):
 
     def evaluate(self, ctx: IndicatorContext) -> FilterResult:
         price = ctx.last_price
+        # NaN must fail rather than clear the gate (`nan < min_price` is False).
+        if pd.isna(price):
+            return self.fail("last price unavailable", price=float("nan"))
         if price < self.min_price:
             return self.fail(f"price {price:.2f} < {self.min_price}", price=price)
         return self.ok(f"price {price:.2f}", price=price)
@@ -178,6 +188,14 @@ class MinAvgVolumeFilter(Filter):
     def evaluate(self, ctx: IndicatorContext) -> FilterResult:
         ctx.require_bars(self.period)
         avg = ctx.avg_volume(self.period)
+        # NaN must fail the gate, not pass it: `nan < min_volume` is False, so
+        # a symbol with no usable volume would silently clear a liquidity
+        # screen that was meant to exclude exactly that kind of name.
+        if pd.isna(avg):
+            return self.fail(
+                f"avg volume unavailable over the last {self.period} bars",
+                avg_volume=float("nan"),
+            )
         if avg < self.min_volume:
             return self.fail(
                 f"avg volume {avg:,.0f} < {self.min_volume:,.0f}", avg_volume=avg

@@ -285,6 +285,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     print_summary(result, show_failed=cfg.show_failed)
     if cfg.verbose:
         print_errors(result)
+    # A sort metric no match carries silently falls back to input order, while
+    # the summary still claims "Sorted by <metric>". Say so instead.
+    if cfg.sort_by and result.n_matches:
+        if not any(cfg.sort_by in m.metrics for m in result.matches):
+            print(
+                f"Warning: no match reports a {cfg.sort_by!r} metric, so the "
+                "output is in input order, not ranked by it.",
+                file=sys.stderr,
+            )
 
     if cfg.output_csv:
         path = cfg.output_csv

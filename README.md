@@ -355,12 +355,15 @@ filter gating, volume metrics, result ranking, ETF parsing (rank order, de-dupin
 non-US filtering), ETF cache freshness and stale fallback, universe composition and
 de-duplication, config round-trip, and an end-to-end scan against generated data.
 
-88 tests, no network access required. Also covers the regression cases that were
+96 tests, no network access required. Also covers the regression cases that were
 reported as latent bugs: config mutation leaking into defaults, RSI warm-up bars,
 the crossover `lookback` boundary, CSV `Adj Close` handling, filter validation,
 report labels following the configured periods, engineered breakouts clearing the
 default 200-day trend gate, ranking by a date metric, duplicate `Close` columns
-from Yahoo, and an ETF cache too short for the requested `--etf-limit`.
+from Yahoo, and an ETF cache too short for the requested `--etf-limit`. A later
+review added: NaN metrics failing (rather than silently clearing) the numeric
+gates, the volume-lookback window staying inside its own bounds, and a flat price
+series reading as neutral RSI rather than overbought.
 
 ---
 

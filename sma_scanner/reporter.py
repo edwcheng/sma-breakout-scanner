@@ -79,9 +79,15 @@ def print_summary(res: ScanResult, *, show_failed: bool = False, stream=sys.stdo
         labels = res.report_labels or {}
         fast_label = labels.get("sma_fast", "SMA fast")[:9]
         slow_label = labels.get("sma_slow", "SMA slow")[:9]
+        # Filter-contributed columns (e.g. the SMA200 column from above_sma)
+        # are part of the report's contract, so the console must show them
+        # too - the HTML report already does.
+        extra = list(res.extra_columns or [])
+        extra_heads = "".join(f" {label[:9]:>9}" for label, _ in extra)
         header = (
             f"{'SYMBOL':<8} {'PRICE':>9} {fast_label:>9} {slow_label:>9} "
             f"{'SPREAD%':>8} {'CROSSED':>12} {'AGO':>4} {'VOLxAVG':>8}"
+            f"{extra_heads}"
         )
         w(header + "\n")
         w("-" * len(header) + "\n")
@@ -89,6 +95,9 @@ def print_summary(res: ScanResult, *, show_failed: bool = False, stream=sys.stdo
             mt = m.metrics
             ratio = mt.get("volume_ratio")
             ratio_s = "-" if ratio is None or ratio != ratio else f"{ratio:.2f}x"
+            extra_cells = "".join(
+                f" {_fmt(mt.get(key)):>9}" for _, key in extra
+            )
             w(
                 f"{m.symbol:<8} "
                 f"{_fmt(mt.get('price')):>9} "
@@ -97,7 +106,8 @@ def print_summary(res: ScanResult, *, show_failed: bool = False, stream=sys.stdo
                 f"{_fmt(mt.get('spread_pct')):>8} "
                 f"{_fmt(mt.get('cross_date'), ''):>12} "
                 f"{_fmt(mt.get('bars_since_cross'), '.0f'):>4} "
-                f"{ratio_s:>8}\n"
+                f"{ratio_s:>8}"
+                f"{extra_cells}\n"
             )
         w("\n")
         w("  VOLxAVG = breakout-day volume / average volume of the 20 bars before it\n")

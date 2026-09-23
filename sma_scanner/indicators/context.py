@@ -96,6 +96,11 @@ class IndicatorContext:
 
         Deliberately excludes the bar itself: including it would let a volume
         spike inflate the very baseline it is being measured against.
+
+        The window is the `lookback` *bars* preceding the index. NaN bars are
+        skipped only within that window - dropping them first and then taking
+        the last `lookback` would reach back before the window and compare a
+        breakout against months-old volume.
         """
         start = max(0, bar_index - int(lookback))
         window = self.volume.iloc[start:bar_index].dropna()
