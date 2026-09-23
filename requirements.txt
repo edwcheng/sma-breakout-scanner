@@ -2,6 +2,9 @@
 pandas>=2.0
 numpy>=1.24
 requests>=2.31
+# HTML table parsing: pandas.read_html has no built-in parser and needs lxml.
+# Required by the default universe - the S&P 500 list is scraped from Wikipedia.
+lxml>=5.0
 
 # Market data - Alpaca is the primary source
 alpaca-py>=0.40

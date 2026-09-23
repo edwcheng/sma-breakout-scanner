@@ -70,7 +70,15 @@ def _from_wikipedia(style: str = "dot") -> List[str]:
         timeout=30,
     )
     resp.raise_for_status()
-    tables = pd.read_html(io.StringIO(resp.text))
+    try:
+        tables = pd.read_html(io.StringIO(resp.text))
+    except ImportError as exc:
+        # pandas ships no HTML parser of its own, so a missing lxml surfaces
+        # here as a bare ImportError with no hint about what to install.
+        raise RuntimeError(
+            "pandas.read_html needs an HTML parser to read the Wikipedia "
+            "constituents table. Install one with `pip install lxml`."
+        ) from exc
     for tbl in tables:
         cols = {str(c).strip().lower() for c in tbl.columns}
         if "symbol" in cols:
