@@ -11,3 +11,6 @@ results/
 data/sp500_tickers.csv
 *.csv
 !examples/*.csv
+
+# Local assistant/workspace state (session memory, scratch files)
+.workbuddy-ai/
