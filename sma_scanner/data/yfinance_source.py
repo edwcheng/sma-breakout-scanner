@@ -15,6 +15,19 @@ import pandas as pd
 from .base import DataSource, FetchBatchResult, PriceFrame, OHLCV_COLUMNS
 
 
+def _coerce_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """Force every OHLCV column to float, filling any that are missing.
+
+    Uses to_numeric(errors="coerce") rather than astype("float64"): a column
+    padded with pd.NA is object dtype, and astype raises
+    "float() argument must be a string or a real number, not 'NAType'".
+    """
+    for col in OHLCV_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df[list(OHLCV_COLUMNS)].apply(pd.to_numeric, errors="coerce")
+
+
 class YFinanceSource(DataSource):
     name = "yfinance"
     supports_batching = True
@@ -31,6 +44,9 @@ class YFinanceSource(DataSource):
     def fetch_batch(self, symbols: Iterable[str], **kwargs: Any) -> FetchBatchResult:
         import yfinance as yf
 
+        # `limit` can only trim here: Yahoo is queried by calendar `period`,
+        # not by bar count, so a larger limit cannot conjure more history.
+        limit = kwargs.get("limit")
         symbols = [s.strip().upper() for s in symbols if s and s.strip()]
         result = FetchBatchResult()
         if not symbols:
@@ -74,14 +90,11 @@ class YFinanceSource(DataSource):
             if df.empty or "Close" not in df.columns:
                 result.add_error(sym, "no usable Close data")
                 continue
-            for col in OHLCV_COLUMNS:
-                if col not in df.columns:
-                    df[col] = pd.NA
-            df = df[list(OHLCV_COLUMNS)].astype(
-                {c: "float64" for c in ("Open", "High", "Low", "Close", "Volume")}
-            )
+            df = _coerce_ohlcv(df)
             df.index = pd.to_datetime(df.index)
             df = df.sort_index()
+            if limit and len(df) > int(limit):
+                df = df.tail(int(limit))
             result.add_frame(PriceFrame(symbol=sym, df=df, source="yfinance"))
 
         return result

@@ -88,6 +88,10 @@ python3.11 main.py --sort-asc              # weakest conviction first
 python3.11 main.py --sort-by ""            # plain alphabetical
 ```
 
+Column headers follow the periods you configured — `--fast 50 --slow 200` prints
+`SMA50`/`SMA200`, and the trend gate adds an `SMA200` column (or `SMA50` with
+`--filter above_sma:period=50`). Labels always match the numbers beneath them.
+
 ---
 
 ## Universe
@@ -184,7 +188,7 @@ python3.11 main.py --config scan.json --max-symbols 40   # quick smoke test
 | `max_symbols` | int \| null | cap the universe (fast runs) |
 | `data_source` | string | `alpaca`, `yfinance`, `csv`, `synthetic` |
 | `source_kwargs` | object | extra constructor args for the source |
-| `history_bars` | int | daily bars fetched per symbol |
+| `history_bars` | int | daily bars per symbol (fetched by Alpaca, trimmed by others) |
 | `filters` | array | the screen — see below |
 | `output_csv` | string \| null | CSV path for matches |
 | `html_output` | string \| null | standalone HTML report path |
@@ -289,6 +293,11 @@ specific filter or data source — that is why new conditions need no engine cha
 Useful flags: `--symbols AAPL,MSFT` (explicit list), `--max-symbols 25` (quick run),
 `--history-bars 400`, `-o results.csv`, `--html web/index.html`, `--show-failed`, `-v`.
 
+**On `history_bars`:** Alpaca fetches exactly that many bars per symbol. The other
+sources can only *trim* to it — yfinance is queried by calendar `period` (default
+`1y`), CSV returns whatever the file holds, and synthetic always generates its
+configured `days`. So raising `history_bars` only reaches further back on Alpaca.
+
 ---
 
 ## Web report
@@ -346,7 +355,10 @@ filter gating, volume metrics, result ranking, ETF parsing (rank order, de-dupin
 non-US filtering), ETF cache freshness and stale fallback, universe composition and
 de-duplication, config round-trip, and an end-to-end scan against generated data.
 
-44 tests, no network access required.
+77 tests, no network access required. Also covers the regression cases that were
+reported as latent bugs: config mutation leaking into defaults, RSI warm-up bars,
+the crossover `lookback` boundary, CSV `Adj Close` handling, filter validation,
+and report labels following the configured periods.
 
 ---
 

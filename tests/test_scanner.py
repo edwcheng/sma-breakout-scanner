@@ -6,6 +6,7 @@ Run:  python3.11 -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 import tempfile
@@ -20,20 +21,24 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sma_scanner import scanner as scanner_mod  # noqa: E402
-from sma_scanner.config import ScanConfig  # noqa: E402
+from sma_scanner.config import DEFAULT_FILTERS, ScanConfig  # noqa: E402
 from sma_scanner.data import PriceFrame, SyntheticSource  # noqa: E402
-from sma_scanner.data import etf_list  # noqa: E402
+from sma_scanner.data import etf_list, sp500  # noqa: E402
+from sma_scanner.data.csv_source import CsvSource  # noqa: E402
 from sma_scanner.data.etf_list import (  # noqa: E402
     fetch_most_traded_etfs,
     parse_most_traded,
 )
+from sma_scanner.data.yfinance_source import _coerce_ohlcv  # noqa: E402
 from sma_scanner.filters import available_filters  # noqa: E402
 from sma_scanner.filters.builtin import AboveSmaFilter, SmaBreakoutFilter  # noqa: E402
 from sma_scanner.indicators import (  # noqa: E402
     IndicatorContext,
     detect_crossovers,
+    rsi,
     sma,
 )
+from sma_scanner.reporter import print_summary  # noqa: E402
 from sma_scanner.scanner import ScanResult, Scanner, SymbolResult  # noqa: E402
 
 
@@ -428,6 +433,253 @@ class TestUniverseComposition(unittest.TestCase):
     def test_unknown_universe_raises(self):
         with self.assertRaises(ValueError):
             self._scanner("nasdaq").resolve_universe()
+
+
+class TestConfigIsolation(unittest.TestCase):
+    """Mutating one config must not leak into defaults or other instances."""
+
+    def setUp(self):
+        # restore pristine defaults in case another test touched them
+        DEFAULT_FILTERS[0]["params"]["fast"] = 20
+
+    def tearDown(self):
+        DEFAULT_FILTERS[0]["params"]["fast"] = 20
+
+    def test_mutation_does_not_reach_new_instances(self):
+        c1 = ScanConfig()
+        c1.filters[0]["params"]["fast"] = 999
+        self.assertEqual(ScanConfig().filters[0]["params"]["fast"], 20)
+
+    def test_mutation_does_not_reach_default_filter_constant(self):
+        c1 = ScanConfig()
+        c1.filters[0]["params"]["fast"] = 999
+        self.assertEqual(DEFAULT_FILTERS[0]["params"]["fast"], 20)
+
+    def test_with_overrides_does_not_share_the_list(self):
+        c1 = ScanConfig()
+        c2 = c1.with_overrides(max_symbols=5)
+        self.assertIsNot(c1.filters, c2.filters)
+        c2.filters[0]["params"]["fast"] = 777
+        self.assertEqual(c1.filters[0]["params"]["fast"], 20)
+
+    def test_patch_breakout_only_affects_one_run(self):
+        """The CLI's --fast path mutates config; that must stay local."""
+        cfg = ScanConfig()
+        cfg.filters[0]["params"]["fast"] = 50
+        self.assertEqual(ScanConfig().filters[0]["params"]["fast"], 20)
+
+
+class TestRsiWarmup(unittest.TestCase):
+    def test_warmup_bars_are_nan_not_100(self):
+        out = rsi(pd.Series([100.0] * 30), 14)
+        self.assertTrue(out.iloc[:14].isna().all())
+        self.assertFalse(out.iloc[14:].isna().any())
+
+    def test_rising_series_is_100_after_warmup(self):
+        out = rsi(pd.Series([100.0 + i for i in range(30)]), 14)
+        self.assertEqual(out.iloc[-1], 100.0)
+
+    def test_falling_series_is_near_zero_after_warmup(self):
+        out = rsi(pd.Series([100.0 - i for i in range(30)]), 14)
+        self.assertAlmostEqual(out.iloc[-1], 0.0, places=6)
+
+
+class TestLookbackBoundary(unittest.TestCase):
+    """A cross exactly `lookback` bars ago must be found."""
+
+    def _series(self, cross_at, n=20):
+        slow = pd.Series([10.0] * n)
+        fast = pd.Series([9.0] * cross_at + [11.0] * (n - cross_at))
+        return fast, slow, n
+
+    def test_cross_on_the_boundary_is_found(self):
+        fast, slow, n = self._series(cross_at=16)  # 3 bars ago
+        for lookback in (3, 4, 5):
+            with self.subTest(lookback=lookback):
+                ev = detect_crossovers(fast, slow, direction="up", lookback=lookback)
+                self.assertEqual([(n - 1) - e.bar_index for e in ev], [3])
+
+    def test_cross_outside_window_is_still_excluded(self):
+        fast, slow, n = self._series(cross_at=16)  # 3 bars ago
+        self.assertEqual(detect_crossovers(fast, slow, direction="up", lookback=2), [])
+
+    def test_bar_index_stays_absolute(self):
+        """Truncating the window must not renumber the bars."""
+        fast, slow, n = self._series(cross_at=16)
+        ev = detect_crossovers(fast, slow, direction="up", lookback=4)
+        self.assertEqual(ev[0].bar_index, 16)
+
+
+class TestCsvSourceColumns(unittest.TestCase):
+    def _write(self, directory: Path, name: str, header: str):
+        rows = "\n".join(
+            f"2024-01-{i + 1:02d},{100 + i},{101 + i},{99 + i},{100 + i},{1000000}"
+            for i in range(30)
+        )
+        (directory / f"{name}.csv").write_text(f"{header}\n{rows}")
+
+    def test_adj_close_is_recognised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write(d, "AAA", "Date,Open,High,Low,Adj Close,Volume")
+            res = CsvSource(d).fetch_batch(["AAA"])
+            self.assertIn("AAA", res.frames)
+            self.assertEqual(res.frames["AAA"].close.iloc[-1], 129.0)
+
+    def test_underscore_header_is_recognised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write(d, "BBB", "Date,Open,High,Low,adj_close,Volume")
+            self.assertIn("BBB", CsvSource(d).fetch_batch(["BBB"]).frames)
+
+    def test_real_close_wins_over_adj_close(self):
+        """Both present -> no duplicate Close column, unadjusted value used."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write(d, "DDD", "Date,Open,High,Low,Close,Adj Close,Volume")
+            res = CsvSource(d).fetch_batch(["DDD"])
+            self.assertEqual(list(res.frames["DDD"].df.columns),
+                             ["Open", "High", "Low", "Close", "Volume"])
+
+    def test_missing_file_and_unparsable_file_are_distinct_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write(d, "CCC", "Date,Open,High,Low,Nonsense,Volume")
+            res = CsvSource(d).fetch_batch(["ZZZ", "CCC"])
+            self.assertEqual(res.errors["ZZZ"], "no CSV file for symbol")
+            self.assertIn("no usable Close data", res.errors["CCC"])
+
+
+class TestYFinanceNumericCoercion(unittest.TestCase):
+    def test_missing_columns_padded_with_na_do_not_raise(self):
+        df = pd.DataFrame({"Close": [1.0, 2.0], "Volume": [10.0, 20.0]})
+        out = _coerce_ohlcv(df)
+        self.assertEqual(set(out.columns), {"Open", "High", "Low", "Close", "Volume"})
+        self.assertTrue((out.dtypes == "float64").all())
+
+    def test_unparseable_values_become_nan(self):
+        df = pd.DataFrame({"Close": ["a", "2.0"], "Volume": [1, 2]})
+        out = _coerce_ohlcv(df)
+        self.assertTrue(pd.isna(out["Close"].iloc[0]))
+        self.assertEqual(out["Close"].iloc[1], 2.0)
+
+
+class TestFilterValidation(unittest.TestCase):
+    def test_bad_direction_raises_at_construction(self):
+        with self.assertRaises(ValueError):
+            SmaBreakoutFilter(direction="sideways")
+
+    def test_string_thresholds_are_coerced(self):
+        f = SmaBreakoutFilter(min_spread_pct="1.5", min_volume_ratio="2")
+        self.assertEqual(f.min_spread_pct, 1.5)
+        self.assertEqual(f.min_volume_ratio, 2.0)
+
+    def test_zero_volume_lookback_raises(self):
+        with self.assertRaises(ValueError):
+            SmaBreakoutFilter(volume_lookback=0)
+
+    def test_above_sma_rejects_zero_period(self):
+        with self.assertRaises(ValueError):
+            AboveSmaFilter(period=0)
+
+
+class TestSyntheticOverride(unittest.TestCase):
+    def _broke_out(self, frame) -> bool:
+        return bool(frame.close.iloc[-1] > frame.close.iloc[-20])
+
+    def test_empty_list_override_clears_the_set(self):
+        src = SyntheticSource(days=60, seed=1, breakout_symbols=["AAA"])
+        res = src.fetch_batch(["AAA"], breakout_symbols=[])
+        self.assertFalse(self._broke_out(res.frames["AAA"]))
+
+    def test_string_override_is_not_iterated_characterwise(self):
+        src = SyntheticSource(days=60, seed=1)
+        res = src.fetch_batch(["AAA", "BBB"], breakout_symbols="AAA,BBB")
+        self.assertTrue(self._broke_out(res.frames["AAA"]))
+        self.assertTrue(self._broke_out(res.frames["BBB"]))
+
+    def test_absent_override_keeps_constructor_default(self):
+        src = SyntheticSource(days=60, seed=1, breakout_symbols=["AAA"])
+        res = src.fetch_batch(["AAA"])
+        self.assertTrue(self._broke_out(res.frames["AAA"]))
+
+    def test_limit_is_honoured(self):
+        src = SyntheticSource(days=120, seed=1)
+        res = src.fetch_batch(["AAA"], limit=30)
+        self.assertEqual(len(res.frames["AAA"]), 30)
+
+
+class TestUniverseStyleAndCache(unittest.TestCase):
+    def test_dot_style_for_alpaca(self):
+        self.assertEqual(Scanner(ScanConfig())._ticker_style(), "dot")
+
+    def test_dash_style_for_yfinance(self):
+        self.assertEqual(
+            Scanner(ScanConfig(data_source="yfinance"))._ticker_style(), "dash"
+        )
+
+    def test_style_reaches_the_fetch(self):
+        with mock.patch.object(
+            scanner_mod, "fetch_sp500_tickers", return_value=["BRK-B"]
+        ) as fn:
+            Scanner(ScanConfig(data_source="yfinance")).resolve_universe()
+        self.assertEqual(fn.call_args.kwargs["style"], "dash")
+
+    def test_truncated_cache_triggers_rescrape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "sp500.csv"
+            pd.DataFrame({"Symbol": [f"S{i}" for i in range(10)]}).to_csv(cache, index=False)
+            with mock.patch.object(
+                sp500, "_from_wikipedia", return_value=[f"W{i}" for i in range(500)]
+            ) as scrape:
+                out = sp500.fetch_sp500_tickers(cache_path=cache)
+            scrape.assert_called_once()
+            self.assertEqual(len(out), 500)
+
+    def test_short_cache_is_used_when_scrape_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "sp500.csv"
+            pd.DataFrame({"Symbol": ["AAA", "BBB"]}).to_csv(cache, index=False)
+            with mock.patch.object(sp500, "_from_wikipedia", side_effect=OSError("offline")):
+                out = sp500.fetch_sp500_tickers(cache_path=cache)
+            self.assertEqual(out, ["AAA", "BBB"])
+
+    def test_ticker_cache_default_is_absolute(self):
+        self.assertTrue(Path(ScanConfig().ticker_cache).is_absolute())
+
+
+class TestReportLabels(unittest.TestCase):
+    def _run(self, filters):
+        src = SyntheticSource(days=400, seed=11, breakout_symbols=["AAA"])
+        return Scanner(ScanConfig(filters=filters), source=src).run(["AAA", "BBB"])
+
+    def test_labels_follow_the_configured_periods(self):
+        res = self._run(
+            [{"name": "sma_breakout", "params": {"fast": 50, "slow": 200, "lookback": 10}}]
+        )
+        self.assertEqual(res.report_labels, {"sma_fast": "SMA50", "sma_slow": "SMA200"})
+
+    def test_trend_column_follows_above_sma_period(self):
+        res = self._run([{"name": "above_sma", "params": {"period": 50}}])
+        self.assertEqual(res.extra_columns, [("SMA50", "sma_50")])
+
+    def test_console_header_uses_dynamic_labels(self):
+        res = ScanResult(
+            report_labels={"sma_fast": "SMA50", "sma_slow": "SMA200"}, sort_by=None
+        )
+        sr = SymbolResult(symbol="AAA")
+        sr.metrics.update(
+            price=1.0, sma_fast=1.0, sma_slow=1.0, spread_pct=1.0, volume_ratio=2.0
+        )
+        res.results.append(sr)
+        buf = io.StringIO()
+        print_summary(res, stream=buf)
+        text = buf.getvalue()
+        header = next(line for line in text.splitlines() if line.startswith("SYMBOL"))
+        self.assertEqual(
+            header.split(),
+            ["SYMBOL", "PRICE", "SMA50", "SMA200", "SPREAD%", "CROSSED", "AGO", "VOLxAVG"],
+        )
 
 
 if __name__ == "__main__":

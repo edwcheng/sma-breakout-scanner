@@ -231,6 +231,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         cfg.source_kwargs.update(parse_kv_pairs(args.source_kw))
 
     if args.filter:
+        # --filter replaces the whole set, so the SMA shortcuts cannot be
+        # applied. Say so instead of silently ignoring them.
+        ignored = [
+            name
+            for name, value in (
+                ("--fast", args.fast), ("--slow", args.slow),
+                ("--lookback", args.lookback), ("--direction", args.direction),
+            )
+            if value is not None
+        ]
+        if ignored:
+            print(
+                f"Warning: {', '.join(ignored)} ignored because --filter "
+                "replaces the filter set. Put the values in the --filter "
+                "spec instead (e.g. --filter sma_breakout:fast=20,slow=50).",
+                file=sys.stderr,
+            )
         try:
             cfg.filters = [parse_filter_spec(s) for s in args.filter]
         except ValueError as exc:

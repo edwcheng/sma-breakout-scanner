@@ -19,6 +19,10 @@ UA = "sma-scanner/1.0 (market data research; https://github.com/) python-request
 
 DEFAULT_CACHE = Path(__file__).resolve().parents[2] / "data" / "sp500_tickers.csv"
 
+#: The real index is ~500 names. Far below this means the cache was truncated
+#: or half-written - re-scrape instead of quietly scanning a short universe.
+MIN_PLAUSIBLE = 400
+
 
 def _normalize(raw_symbols: List[str], style: str = "dot") -> List[str]:
     """Clean tickers into a single share-class convention.
@@ -72,7 +76,7 @@ def _from_wikipedia(style: str = "dot") -> List[str]:
         if "symbol" in cols:
             sym_col = next(c for c in tbl.columns if str(c).strip().lower() == "symbol")
             tickers = _normalize(tbl[sym_col].astype(str).tolist(), style)
-            if len(tickers) > 400:  # sanity: real list is ~500
+            if len(tickers) >= MIN_PLAUSIBLE:  # sanity: real list is ~500
                 return tickers
     raise RuntimeError("Wikipedia page parsed, but no constituents table found")
 
@@ -117,14 +121,25 @@ def fetch_sp500_tickers(
 
     cache = Path(cache_path).expanduser()
 
-    # 2. Cache hit (unless refreshing).
+    # 2. Cache hit (unless refreshing) - but only if it looks complete.
+    cached: List[str] = []
     if cache.exists() and not refresh:
-        ticks = _read_cache(cache, style)
-        if ticks:
-            return ticks
+        try:
+            cached = _read_cache(cache, style)
+        except Exception:  # noqa: BLE001 - unreadable cache is just a miss
+            cached = []
+        if len(cached) >= MIN_PLAUSIBLE:
+            return cached
+        # Too short to trust: fall through and re-scrape.
 
-    # 3. Scrape and cache.
-    ticks = _from_wikipedia(style)
+    # 3. Scrape and cache. If the scrape fails we still prefer a short cache
+    # over no universe at all.
+    try:
+        ticks = _from_wikipedia(style)
+    except Exception:
+        if cached:
+            return cached
+        raise
     cache.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"Symbol": ticks}).to_csv(cache, index=False)
     return ticks

@@ -7,6 +7,7 @@ means editing a config file (or passing CLI flags), not editing code.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -23,6 +24,11 @@ DEFAULT_FILTERS: List[Dict[str, Any]] = [
     {"name": "above_sma", "params": {"period": 200}},
 ]
 
+#: Caches live beside the project, not beside whatever directory the command
+#: happens to run from - otherwise the same scan run from two directories
+#: silently maintains two divergent copies of the universe.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 @dataclass
 class ScanConfig:
@@ -30,8 +36,8 @@ class ScanConfig:
     #: "sp500" | "etf" | "both" | "file"
     universe: str = "both"
     symbols_file: Optional[str] = None  # used when universe == "file"
-    ticker_cache: str = "data/sp500_tickers.csv"
-    etf_cache: str = "data/most_traded_etfs.csv"
+    ticker_cache: str = str(_PROJECT_ROOT / "data" / "sp500_tickers.csv")
+    etf_cache: str = str(_PROJECT_ROOT / "data" / "most_traded_etfs.csv")
     etf_limit: int = 100  # how many most-traded ETFs to include
     etf_refresh_days: int = 7  # re-scrape the ETF list once cache is older
     refresh_tickers: bool = False  # force-refresh every list
@@ -43,8 +49,11 @@ class ScanConfig:
     history_bars: int = 400  # daily bars to fetch per symbol
 
     # -- screening ------------------------------------------------------
+    # Deep copy: a shallow `dict(f)` would share each inner `params` dict
+    # with DEFAULT_FILTERS, so one run's mutation (e.g. --fast) would leak
+    # into every later ScanConfig in the same process.
     filters: List[Dict[str, Any]] = field(
-        default_factory=lambda: [dict(f) for f in DEFAULT_FILTERS]
+        default_factory=lambda: copy.deepcopy(DEFAULT_FILTERS)
     )
 
     # -- output ---------------------------------------------------------
@@ -70,9 +79,19 @@ class ScanConfig:
         return out
 
     def with_overrides(self, **kwargs: Any) -> "ScanConfig":
-        """Return a copy with selected fields replaced (ignores None)."""
+        """Return a copy with selected fields replaced (ignores None).
+
+        `filters` is deep-copied so the original config keeps its own list -
+        `dataclasses.replace` would otherwise hand both configs the same
+        mutable object.
+        """
         clean = {k: v for k, v in kwargs.items() if v is not None}
-        return replace(self, **clean)
+        if "filters" in clean:
+            clean["filters"] = copy.deepcopy(clean["filters"])
+        out = replace(self, **clean)
+        if "filters" not in clean:
+            out.filters = copy.deepcopy(self.filters)
+        return out
 
     # ------------------------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:

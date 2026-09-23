@@ -8,12 +8,29 @@ or for scanning broker exports. Expects one file per symbol:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
 
 from .base import DataSource, FetchBatchResult, PriceFrame, OHLCV_COLUMNS
+
+#: Canonical header -> our column name. Keyed on a normalised form so that
+#: "Adj Close", "adj_close", "ADJ  CLOSE" and "Close" all resolve.
+_ALIASES = {
+    "open": "Open",
+    "high": "High",
+    "low": "Low",
+    "close": "Close",
+    "adj close": "Close",  # broker exports often ship only the adjusted close
+    "volume": "Volume",
+}
+
+
+def _canonical(name: object) -> str:
+    """Lowercase, collapse separators: 'Adj_Close' -> 'adj close'."""
+    return re.sub(r"[\s_\-]+", " ", str(name).strip().lower())
 
 
 class CsvSource(DataSource):
@@ -39,17 +56,19 @@ class CsvSource(DataSource):
         df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
         df = df.dropna(subset=[date_col]).set_index(date_col)
 
-        rename = {
-            "open": "Open",
-            "high": "High",
-            "low": "Low",
-            "close": "Close",
-            "adj close": "Close",
-            "adj_close": "Close",
-            "volume": "Volume",
-        }
-        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-        df = df.rename(columns={c: c.capitalize() for c in df.columns})
+        # Map headers case-insensitively. If a real "Close" exists it wins
+        # and "Adj Close" is ignored, so we never create duplicate columns.
+        canon = {c: _canonical(c) for c in df.columns}
+        has_close = any(v == "close" for v in canon.values())
+        rename = {}
+        for col, key in canon.items():
+            if key == "adj close":
+                if not has_close:
+                    rename[col] = "Close"
+            elif key in _ALIASES:
+                rename[col] = _ALIASES[key]
+        df = df.rename(columns=rename)
+        df = df.loc[:, ~df.columns.duplicated()]
 
         for col in OHLCV_COLUMNS:
             if col not in df.columns:
@@ -61,16 +80,27 @@ class CsvSource(DataSource):
         return PriceFrame(symbol=symbol, df=df, source="csv")
 
     def fetch_batch(self, symbols: Iterable[str], **kwargs) -> FetchBatchResult:
+        limit = kwargs.get("limit")
         result = FetchBatchResult()
         for sym in symbols:
             sym = sym.strip().upper()
+            path = self.directory / f"{sym}.csv"
+            if not path.exists():
+                result.add_error(sym, "no CSV file for symbol")
+                continue
             try:
                 frame = self._read_one(sym)
             except (pd.errors.ParserError, ValueError, OSError) as exc:
                 result.add_error(sym, f"csv parse failed: {exc}")
                 continue
             if frame is None:
-                result.add_error(sym, "no CSV file for symbol")
-            else:
-                result.add_frame(frame)
+                # The file exists but yielded nothing usable - say so, rather
+                # than claiming the file is missing.
+                result.add_error(sym, "no usable Close data (check column names)")
+                continue
+            if limit and len(frame) > int(limit):
+                frame = PriceFrame(
+                    symbol=sym, df=frame.df.tail(int(limit)), source=frame.source
+                )
+            result.add_frame(frame)
         return result

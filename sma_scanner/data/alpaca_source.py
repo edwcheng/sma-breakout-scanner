@@ -202,8 +202,9 @@ class AlpacaSource(DataSource):
                 continue
             try:
                 frame = self._rows_to_frame(sym, rows)
-            except (KeyError, ValueError, TypeError) as exc:
-                result.add_error(sym, f"malformed bars: {exc}")
+            except Exception as exc:  # noqa: BLE001 - one unparseable symbol
+                # must not abort the whole batch; record it and carry on.
+                result.add_error(sym, f"malformed bars: {type(exc).__name__}: {exc}")
                 continue
             if frame is None:
                 result.add_error(sym, "empty history after normalization")

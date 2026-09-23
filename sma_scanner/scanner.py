@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .config import ScanConfig
 from .data import (
@@ -78,6 +78,13 @@ class ScanResult:
     #: Ranking applied to `matches` (and therefore to every output form).
     sort_by: Optional[str] = "volume_ratio"
     sort_desc: bool = True
+
+    #: {metric_key: header label} contributed by the active filters, so report
+    #: columns follow the configured periods rather than hardcoded
+    #: "SMA20"/"SMA50"/"SMA200".
+    report_labels: Dict[str, str] = field(default_factory=dict)
+    #: Extra (label, metric_key) report columns contributed by filters.
+    extra_columns: List[Tuple[str, str]] = field(default_factory=list)
 
     @property
     def matches(self) -> List[SymbolResult]:
@@ -149,6 +156,14 @@ class Scanner:
         self._source_name = config.data_source
 
     # -- universe -------------------------------------------------------
+    def _ticker_style(self) -> str:
+        """Share-class notation the configured source expects.
+
+        Alpaca wants BRK.B; Yahoo/yfinance wants BRK-B. Getting this wrong
+        makes every class-share ticker silently fail to resolve.
+        """
+        return "dash" if self.config.data_source == "yfinance" else "dot"
+
     def resolve_universe(self) -> List[str]:
         """Build the symbol list: S&P 500, most-traded ETFs, or both.
 
@@ -159,12 +174,16 @@ class Scanner:
         if cfg.universe == "file" or cfg.symbols_file:
             if not cfg.symbols_file:
                 raise ValueError("universe='file' requires symbols_file")
-            symbols = fetch_sp500_tickers(symbols_file=cfg.symbols_file)
+            symbols = fetch_sp500_tickers(
+                symbols_file=cfg.symbols_file, style=self._ticker_style()
+            )
         elif cfg.universe in {"sp500", "etf", "both"}:
             symbols = []
             if cfg.universe in {"sp500", "both"}:
                 symbols += fetch_sp500_tickers(
-                    refresh=cfg.refresh_tickers, cache_path=cfg.ticker_cache
+                    refresh=cfg.refresh_tickers,
+                    cache_path=cfg.ticker_cache,
+                    style=self._ticker_style(),
                 )
             if cfg.universe in {"etf", "both"}:
                 symbols += fetch_most_traded_etfs(
@@ -197,11 +216,19 @@ class Scanner:
         if symbols is None:
             symbols = self.resolve_universe()
         symbols = list(symbols)
+        labels: Dict[str, str] = {}
+        extras: List[Tuple[str, str]] = []
+        for f in self.filters:
+            labels.update(f.report_labels())
+            extras.extend(f.report_columns())
+
         result = ScanResult(
             universe_size=len(symbols),
             filters_used=[type(f).name for f in self.filters],
             sort_by=self.config.sort_by,
             sort_desc=self.config.sort_desc,
+            report_labels=labels,
+            extra_columns=extras,
         )
         if not symbols:
             return result

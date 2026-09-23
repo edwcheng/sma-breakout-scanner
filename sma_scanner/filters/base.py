@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 from ..indicators.context import IndicatorContext
 
@@ -55,6 +55,19 @@ class Filter(ABC):
         the scanner records that as "skipped" rather than a hard failure.
         """
         raise NotImplementedError
+
+    # -- reporting hooks ------------------------------------------------
+    def report_labels(self) -> Dict[str, str]:
+        """Header labels for metrics *this* filter emits: {metric_key: label}.
+
+        Lets a filter rename a column when its parameters change - e.g. a
+        breakout on 50/200 should print "SMA50"/"SMA200", not "SMA20"/"SMA50".
+        """
+        return {}
+
+    def report_columns(self) -> List[Tuple[str, str]]:
+        """Extra (label, metric_key) columns to append to the report."""
+        return []
 
     # -- helpers for subclasses -----------------------------------------
     def fail(self, reason: str, **metrics: Any) -> FilterResult:

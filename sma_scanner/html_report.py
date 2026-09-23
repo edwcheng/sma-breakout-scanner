@@ -117,12 +117,16 @@ def write_html(
     )
 
     if matches:
+        # Labels and extra columns come from the active filters, so headers
+        # match the periods the numbers were actually computed on.
+        labels = res.report_labels or {}
         cols = [
-            ("Symbol", "sym"), ("Price", "price"), ("SMA20", "sma_fast"),
-            ("SMA50", "sma_slow"), ("Spread %", "spread_pct"), ("Crossed", "cross_date"),
+            ("Symbol", "sym"), ("Price", "price"),
+            (labels.get("sma_fast", "SMA fast"), "sma_fast"),
+            (labels.get("sma_slow", "SMA slow"), "sma_slow"),
+            ("Spread %", "spread_pct"), ("Crossed", "cross_date"),
             ("Bars ago", "bars_since_cross"), ("Vol x avg", "volume_ratio"),
-            ("SMA200", "sma_200"),
-        ]
+        ] + list(res.extra_columns or [])
         # Highlight the column the rows are already ranked by. The JS reads
         # data-dir to decide the first click, so "desc" means the next click
         # flips to ascending - consistent with the current ordering.

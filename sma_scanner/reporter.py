@@ -74,8 +74,13 @@ def print_summary(res: ScanResult, *, show_failed: bool = False, stream=sys.stdo
     if not matches:
         w("  No symbols matched the configured conditions.\n\n")
     else:
+        # Labels follow the configured periods: a 50/200 scan must not print
+        # its numbers under "SMA20"/"SMA50".
+        labels = res.report_labels or {}
+        fast_label = labels.get("sma_fast", "SMA fast")[:9]
+        slow_label = labels.get("sma_slow", "SMA slow")[:9]
         header = (
-            f"{'SYMBOL':<8} {'PRICE':>9} {'SMA20':>9} {'SMA50':>9} "
+            f"{'SYMBOL':<8} {'PRICE':>9} {fast_label:>9} {slow_label:>9} "
             f"{'SPREAD%':>8} {'CROSSED':>12} {'AGO':>4} {'VOLxAVG':>8}"
         )
         w(header + "\n")

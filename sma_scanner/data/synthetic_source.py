@@ -43,9 +43,7 @@ class SyntheticSource(DataSource):
         self.recovery_drift = recovery_drift
         self.decline_drift = decline_drift
         self.base_volume = base_volume
-        self.breakout_symbols = {
-            s.strip().upper() for s in (breakout_symbols or [])
-        }
+        self.breakout_symbols = self._as_symbol_set(breakout_symbols)
 
     # ------------------------------------------------------------------
     def _random_walk(self, rng: np.random.Generator) -> np.ndarray:
@@ -86,15 +84,38 @@ class SyntheticSource(DataSource):
         df = df[list(OHLCV_COLUMNS)]
         return PriceFrame(symbol=symbol, df=df, source="synthetic")
 
+    @staticmethod
+    def _as_symbol_set(values) -> set:
+        """Accept None / iterable / comma-separated string.
+
+        `is not None` rather than truthiness, so an explicit empty list
+        really does clear the set instead of falling back to the default.
+        """
+        if values is None:
+            return set()
+        if isinstance(values, str):
+            values = values.split(",")
+        return {str(s).strip().upper() for s in values if str(s).strip()}
+
     def fetch_batch(
         self, symbols: Iterable[str], *, breakout_symbols: Optional[Iterable[str]] = None, **kwargs
     ) -> FetchBatchResult:
         symbols = [s.strip().upper() for s in symbols if s and s.strip()]
-        override = {s.strip().upper() for s in (breakout_symbols or [])}
-        breakouts = override or self.breakout_symbols
+        # None means "not supplied" -> keep the constructor's set.
+        breakouts = (
+            self.breakout_symbols
+            if breakout_symbols is None
+            else self._as_symbol_set(breakout_symbols)
+        )
+        limit = kwargs.get("limit")
         result = FetchBatchResult()
         for i, sym in enumerate(symbols):
             rng = np.random.default_rng(self.seed + i)
             closes = self._breakout_walk(rng) if sym in breakouts else self._random_walk(rng)
-            result.add_frame(self._to_frame(sym, closes, rng))
+            frame = self._to_frame(sym, closes, rng)
+            if limit and len(frame) > int(limit):
+                frame = PriceFrame(
+                    symbol=sym, df=frame.df.tail(int(limit)), source=frame.source
+                )
+            result.add_frame(frame)
         return result

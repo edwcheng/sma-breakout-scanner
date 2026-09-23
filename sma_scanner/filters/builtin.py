@@ -57,14 +57,30 @@ class SmaBreakoutFilter(Filter):
         self.fast = int(fast)
         self.slow = int(slow)
         self.lookback = int(lookback)
-        self.direction = direction
-        self.min_spread_pct = min_spread_pct
+        self.direction = str(direction).lower()
+        # Coerce optional thresholds: a string straight out of a config file
+        # would otherwise raise TypeError per-symbol and land in "skipped".
+        self.min_spread_pct = (
+            None if min_spread_pct is None else float(min_spread_pct)
+        )
         self.volume_lookback = int(volume_lookback)
-        self.min_volume_ratio = min_volume_ratio
+        self.min_volume_ratio = (
+            None if min_volume_ratio is None else float(min_volume_ratio)
+        )
+        # Fail at construction, not per-symbol: a bad value here otherwise
+        # shows up as every symbol being "skipped" instead of a loud error.
         if self.fast >= self.slow:
             raise ValueError(f"fast ({fast}) must be < slow ({slow})")
         if self.lookback < 1:
             raise ValueError("lookback must be >= 1")
+        if self.direction not in {"up", "down"}:
+            raise ValueError(f"direction must be 'up' or 'down', got {direction!r}")
+        if self.volume_lookback < 1:
+            raise ValueError("volume_lookback must be >= 1")
+
+    # -- reporting ------------------------------------------------------
+    def report_labels(self) -> Dict[str, str]:
+        return {"sma_fast": f"SMA{self.fast}", "sma_slow": f"SMA{self.slow}"}
 
     def evaluate(self, ctx: IndicatorContext) -> FilterResult:
         # +1 so the SMA is warm and we can see the bar before the cross.
@@ -108,8 +124,10 @@ class SmaBreakoutFilter(Filter):
         ratio = vol["volume_ratio"]
         if self.min_volume_ratio is not None:
             if pd.isna(ratio) or ratio < self.min_volume_ratio:
+                # NaN would render as the string "nanx" - say "n/a" instead.
+                shown = "n/a" if pd.isna(ratio) else f"{ratio:.2f}x"
                 return self.fail(
-                    f"breakout volume {ratio:.2f}x average below required "
+                    f"breakout volume {shown} average below required "
                     f"{self.min_volume_ratio}x",
                     **vol,
                 )
@@ -177,6 +195,13 @@ class AboveSmaFilter(Filter):
     def __init__(self, period: int = 200) -> None:
         super().__init__(period=period)
         self.period = int(period)
+        if self.period < 1:
+            raise ValueError(f"period must be >= 1, got {period}")
+
+    def report_columns(self):
+        # Label follows the configured period, so --filter above_sma:period=50
+        # gets an "SMA50" column instead of a blank "SMA200".
+        return [(f"SMA{self.period}", f"sma_{self.period}")]
 
     def evaluate(self, ctx: IndicatorContext) -> FilterResult:
         ctx.require_bars(self.period)

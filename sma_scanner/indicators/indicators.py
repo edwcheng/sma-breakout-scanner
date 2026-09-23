@@ -49,12 +49,16 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     # Wilder smoothing == EWM with alpha = 1/period
     avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    # Warm-up bars (first period-1) have no average yet and must stay NaN -
+    # reporting them as 100 would make a flat opening look overbought.
+    warming_up = avg_loss.isna()
     # Zero loss => RSI 100. Mask (rather than replace with pd.NA) to keep a
     # clean float dtype across pandas versions.
     avg_loss = avg_loss.mask(avg_loss == 0.0)
     rs = avg_gain / avg_loss
     out = 100.0 - (100.0 / (1.0 + rs))
     out = out.where(avg_loss.notna(), 100.0)
+    out = out.where(~warming_up, float("nan"))
     return out.astype(float)
 
 
@@ -109,7 +113,9 @@ def detect_crossovers(
         slow: the slower series, e.g. 50-day SMA.
         direction: "up" for golden crosses, "down" for death crosses,
             "both" for every crossing.
-        lookback: if set, only consider the last `lookback` bars.
+        lookback: if set, only report crossings within the last `lookback`
+            bars. A cross exactly `lookback` bars ago IS included (the
+            window keeps one extra bar of context for the comparison).
 
     Returns:
         Chronological list of Crossover events. Empty if none.
@@ -121,7 +127,10 @@ def detect_crossovers(
     if lookback is not None:
         if lookback < 1:
             raise ValueError("lookback must be >= 1")
-        aligned = aligned.tail(lookback + 1)  # +1 so we can see the prior bar
+        # +2, not +1: a cross needs the bar itself AND the bar before it.
+        # A cross exactly `lookback` bars ago sits on the left edge, so the
+        # prior bar must survive the truncation too.
+        aligned = aligned.tail(lookback + 2)
 
     f, s = aligned["f"], aligned["s"]
     pf, ps = f.shift(1), s.shift(1)
