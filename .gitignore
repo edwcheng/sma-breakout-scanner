@@ -8,6 +8,9 @@ venv/
 
 # Generated output
 results/
+site/
+publish/
+.scan.lock
 data/sp500_tickers.csv
 *.csv
 !examples/*.csv

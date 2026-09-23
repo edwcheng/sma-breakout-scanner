@@ -1,0 +1,122 @@
+name: Daily SMA scan
+
+# Runs the scanner on GitHub's runners and publishes the HTML report to
+# GitHub Pages. No server to maintain - the runner is created per run and
+# thrown away afterwards.
+on:
+  schedule:
+    # 01:17 UTC == 09:17 Asia/Shanghai, comfortably after the US close.
+    # Deliberately not on the hour: Actions is busiest at :00 and scheduled
+    # runs there are the ones most likely to be delayed or dropped.
+    - cron: '17 1 * * *'
+  # Lets you trigger a run by hand from the Actions tab.
+  workflow_dispatch:
+
+# Least privilege: the scan job only reads the repo. `pages: write` and
+# `id-token: write` are granted to the deploy job only.
+permissions:
+  contents: read
+
+# Never let two deployments race each other.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the scan
+        env:
+          # Set these under Settings -> Secrets and variables -> Actions.
+          # main.py reads them from the environment; .env is only a fallback.
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          # The report stamps its own generation time with local time.
+          TZ: Asia/Shanghai
+        run: |
+          mkdir -p site results
+          # Retry on transient network/API errors. Only the last failure counts.
+          for attempt in 1 2 3; do
+            if python main.py -v \
+                -o results/breakouts.csv \
+                --html site/index.html \
+                --summary-json results/summary.json; then
+              exit 0
+            fi
+            echo "::warning::scan attempt ${attempt} failed; retrying in 30s"
+            sleep 30
+          done
+          exit 1
+
+      - name: Gate on run health
+        # The scan exits 0 even when it fetched nothing useful: a data outage
+        # skips symbols instead of raising, and a failed universe refresh falls
+        # back to a stale list. This checks the counters the scan recorded and
+        # fails the run rather than publishing a plausible-looking empty page.
+        # The numbers land in the run summary, so every run documents itself.
+        run: |
+          python -m sma_scanner.summary results/summary.json \
+            --markdown "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the CSV and the health summary
+        # Always, so a failed run still leaves something to inspect.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-output-${{ github.run_id }}
+          path: |
+            results/breakouts.csv
+            results/summary.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload the report as a Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: scan
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  notify:
+    needs: [scan, deploy]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send a failure notice
+        # Optional. Point a NOTIFY_URL secret at ntfy.sh, a Slack or Discord
+        # webhook, or anything that accepts a plain-text POST. Without it the
+        # failure still shows in the Actions tab and, if you have them enabled,
+        # in GitHub's own email notifications.
+        env:
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$NOTIFY_URL" ]; then
+            echo "No NOTIFY_URL secret set - relying on the Actions tab."
+            exit 0
+          fi
+          curl -fsS -X POST -H 'Title: SMA scan failed' \
+            --data "The daily SMA scan did not publish. $RUN_URL" \
+            "$NOTIFY_URL" || echo "::warning::notification failed"

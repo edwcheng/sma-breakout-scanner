@@ -192,6 +192,7 @@ python3.11 main.py --config scan.json --max-symbols 40   # quick smoke test
 | `filters` | array | the screen — see below |
 | `output_csv` | string \| null | CSV path for matches |
 | `html_output` | string \| null | standalone HTML report path |
+| `summary_json` | string \| null | machine-readable run health (see below) |
 | `show_failed` | bool | also list rejected symbols and why |
 | `verbose` | bool | progress log + fetch errors |
 | `sort_by` | string \| null | metric used to rank output (default `volume_ratio`) |
@@ -274,6 +275,7 @@ sma_scanner/
     builtin.py           the concrete conditions
   scanner.py             orchestration: fetch -> evaluate -> collect
   reporter.py            console table + CSV
+  summary.py             run health for schedulers (counts, caches, gate)
 ```
 
 Each layer only knows the interface below it. `scanner.py` never references a
@@ -316,12 +318,51 @@ conviction), amber below 0.8x (weak).
 The command to run each day:
 
 ```bash
-python3.11 main.py -o results/breakouts.csv --html web/index.html
+python3.11 main.py -o results/breakouts.csv --html site/index.html \
+  --summary-json results/summary.json
 ```
 
 **09:00 Asia/Shanghai (UTC+8)** is a good slot: that is 01:00 UTC, after the US
 close, so each run reflects the previous *completed* US session rather than a
 mid-session partial bar. A full run takes about 25 seconds.
+
+### Don't publish a run you can't trust
+
+The scanner is deliberately forgiving: a symbol that fails to fetch is skipped,
+and a failed universe refresh falls back to the stale cache with a warning.
+Neither raises. That is right for an interactive run, and wrong for a scheduled
+one, where the failure mode is a page that looks plausible and is empty.
+
+`--summary-json` writes down what the run knows about itself:
+
+```json
+{
+  "universe_size": 603, "evaluated": 603, "skipped": 0, "matches": 22,
+  "fetch_errors": 0, "fetch_error_rate": 0.0, "fetch_error_symbols": [],
+  "caches": {"tickers": {"age_days": 0.0, "stale": false},
+             "etfs": {"age_days": 0.06, "stale": false}},
+  "universe_source": "both"
+}
+```
+
+Gate a run on it before publishing. The exit code is 0 only if it clears every
+threshold:
+
+```bash
+python3.11 -m sma_scanner.summary results/summary.json
+python3.11 -m sma_scanner.summary results/summary.json \
+    --min-universe 500 --min-evaluated-ratio 0.95 --max-fetch-error-rate 0.02 \
+    --markdown "$GITHUB_STEP_SUMMARY"
+```
+
+Four checks: the universe is not suspiciously small (a missing or truncated
+symbol list), at least 95% of it was evaluated, fewer than 2% of symbols failed
+to fetch, and no cache the run actually used is stale. A handful of bad symbols
+is normal and passes; a data outage does not. Only caches the run read are
+judged - a `--symbols` run consults no ticker list, so it is not judged on one.
+
+Both schedulers below call this same one-liner, so a run behaves identically
+whichever one you pick.
 
 ### Use cron on a persistent machine
 
@@ -330,17 +371,73 @@ tasks fire on time but execute in an isolated sandbox with a separate
 filesystem - a probe task fired exactly on schedule and its marker file never
 appeared in `/workspace` - and no delivery channel was bound, so the output went
 nowhere. Daily automation therefore needs an environment where cron owns the
-filesystem:
+filesystem. [`scripts/run_scan.sh`](scripts/run_scan.sh) wraps the whole thing -
+lock, retry, gate, publish:
 
-```cron
-# 09:00 Asia/Shanghai == 01:00 UTC
-0 1 * * * cd /path/to/sma_scanner && python3.11 main.py -o results/breakouts.csv --html web/index.html >> /var/log/sma-scan.log 2>&1
+```bash
+chmod +x scripts/run_scan.sh
+crontab -e
+# 01:00 UTC == 09:00 Asia/Shanghai
+0 1 * * * /opt/sma-breakout-scanner/scripts/run_scan.sh >> /var/log/sma-scan.log 2>&1
 ```
 
-If the machine's local time is already UTC+8, use `0 9 * * *` instead.
+If the machine's local time is already UTC+8, use `0 9 * * *` instead. Note that
+the system timezone decides when cron fires; the `TZ` the script exports only
+affects the report's own timestamp. Add a logrotate entry for that log - it is
+appended to every day.
 
-Keep credentials in `.env` on that machine. Never inline the Alpaca key into a
-scheduled-task prompt - task definitions are stored server-side in plaintext.
+A step-by-step runbook for a fresh box - packages, venv, deploy key, cron,
+logrotate, and a troubleshooting table - is in
+[`docs/vps-setup.md`](docs/vps-setup.md).
+
+The script runs the scan (retrying transient failures), gates it, and only then
+pushes `site/index.html` to the `gh-pages` branch that GitHub Pages serves. A
+failed gate means nothing is pushed, so the last good report stays live. It
+refuses to run twice at once, and can be exercised without publishing:
+
+```bash
+./scripts/run_scan.sh --no-publish              # scan + gate, leave the file
+EXTRA_ARGS="--universe sp500" ./scripts/run_scan.sh
+```
+
+Publishing needs a credential for the remote; an SSH deploy key scoped to this
+repository is the right shape. Keep credentials in `.env` on that machine.
+Never inline the Alpaca key into a scheduled-task prompt - task definitions are
+stored server-side in plaintext.
+
+### Or: let GitHub Actions run it
+
+[`.github/workflows/daily-scan.yml`](.github/workflows/daily-scan.yml) does the
+same thing with no server: it installs the dependencies, runs the scan, uploads
+the HTML as a Pages artifact and deploys it. Setup is three steps:
+
+1. Add `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` as repository secrets
+   (Settings -> Secrets and variables -> Actions).
+2. Set Pages to build from Actions (Settings -> Pages -> Source -> **GitHub
+   Actions**). One-time only.
+3. Done - it runs at 01:17 UTC (09:17 Asia/Shanghai) and on demand via
+   *Run workflow*.
+
+Notes that matter:
+
+- **Schedule is best-effort.** Scheduled runs are queued like any other job and
+  can be delayed under load, or occasionally dropped. The workflow deliberately
+  avoids the top of the hour, where that is most likely. A late run is harmless
+  here, but do not treat the timestamp as precise.
+- **Public repos go to sleep.** GitHub disables scheduled workflows in a public
+  repository after 60 days with no repository activity, and an artifact deploy
+  pushes no commits. If the schedule stops, re-enable it on the Actions tab, or
+  commit the daily CSV back to the repo to keep it active.
+- **Nothing persists between runs.** The universe caches (`data/*.csv`) are
+  rebuilt from Wikipedia and TradingView every run, which costs a few seconds
+  and keeps the universe fresh.
+- **Failed scans do not publish.** The workflow retries three times, then runs
+  the same health gate described above against `results/summary.json`. A run
+  that fetched nothing fails the job instead of replacing a good page with an
+  empty one, so the previously published report stays live. The counters are
+  also written to the run's summary page, so every run documents its own health,
+  and the CSV plus the summary JSON are kept as artifacts even when the job
+  fails.
 
 ---
 
@@ -355,7 +452,7 @@ filter gating, volume metrics, result ranking, ETF parsing (rank order, de-dupin
 non-US filtering), ETF cache freshness and stale fallback, universe composition and
 de-duplication, config round-trip, and an end-to-end scan against generated data.
 
-96 tests, no network access required. Also covers the regression cases that were
+115 tests, no network access required. Also covers the regression cases that were
 reported as latent bugs: config mutation leaking into defaults, RSI warm-up bars,
 the crossover `lookback` boundary, CSV `Adj Close` handling, filter validation,
 report labels following the configured periods, engineered breakouts clearing the
@@ -364,6 +461,11 @@ from Yahoo, and an ETF cache too short for the requested `--etf-limit`. A later
 review added: NaN metrics failing (rather than silently clearing) the numeric
 gates, the volume-lookback window staying inside its own bounds, and a flat price
 series reading as neutral RSI rather than overbought.
+
+Run health has its own coverage: cache age thresholds and staleness, the data
+outage that must be refused, the handful of bad symbols that must not be, and
+the gate CLI's exit codes - including that an unwritable run-summary file
+cannot turn a healthy run into a failure.
 
 ---
 

@@ -1,0 +1,8 @@
+# Store shell scripts with LF endings, always.
+#
+# A CRLF shebang makes bash fail on Linux with "bad interpreter: No such file
+# or directory" - which in a cron log looks like the script never ran at all.
+# This machine has core.autocrlf=true, so without this rule a Windows checkout
+# plus a copy to a Linux box is enough to reintroduce it.
+*.sh text eol=lf
+*.py text eol=lf
