@@ -33,6 +33,8 @@ th,td{padding:10px 12px;text-align:right;white-space:nowrap;font-variant-numeric
 th{background:#1b2129;color:var(--dim);font-size:11px;text-transform:uppercase;
 letter-spacing:.5px;cursor:pointer;user-select:none;position:sticky;top:0}
 th:hover{color:var(--accent)}
+th.sorted-col{color:var(--accent)}
+th .arrow{font-size:9px;opacity:.8}
 th:first-child,td:first-child{text-align:left}
 tbody tr{border-top:1px solid var(--line)}
 tbody tr:hover{background:#1c222b}
@@ -121,8 +123,17 @@ def write_html(
             ("Bars ago", "bars_since_cross"), ("Vol x avg", "volume_ratio"),
             ("SMA200", "sma_200"),
         ]
+        # Highlight the column the rows are already ranked by. The JS reads
+        # data-dir to decide the first click, so "desc" means the next click
+        # flips to ascending - consistent with the current ordering.
+        active_dir = "desc" if res.sort_desc else "asc"
+        arrow = "&#9660;" if res.sort_desc else "&#9650;"
         thead = "".join(
-            f'<th data-dir="desc">{escape(label)}</th>' for label, _ in cols
+            f'<th class="sorted-col" data-dir="{active_dir}">'
+            f"{escape(label)}<span class=\"arrow\"> {arrow}</span></th>"
+            if key == res.sort_by
+            else f'<th data-dir="desc">{escape(label)}</th>'
+            for label, key in cols
         )
         body_rows: List[str] = []
         for m in matches:
@@ -164,6 +175,10 @@ def write_html(
     if extra_note:
         note += f"<br>{escape(extra_note)}"
 
+    sort_label = next(
+        (label for label, key in cols if key == res.sort_by), res.sort_by or ""
+    ) if matches else ""
+    order = "highest first" if res.sort_desc else "lowest first"
     filters = escape(", ".join(res.filters_used) or "(none)")
     html = (
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
@@ -175,7 +190,13 @@ def write_html(
         f"<div class='cards'>{head}</div>"
         f"{table}"
         f"<div class='legend'>{note}</div>"
-        "<div class='note'>Click any column header to sort. Signals are computed "
+        "<div class='note'>"
+        + (
+            f"Rows are ranked by <b>{escape(sort_label)}</b>, {order}. "
+            if sort_label
+            else ""
+        )
+        + "Click any column header to re-sort. Signals are computed "
         "from daily bars; if the report is generated before the market close, the "
         "current day's bar is still forming.</div>"
         "<footer>Screening tool output - not investment advice.</footer>"

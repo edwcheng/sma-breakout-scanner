@@ -1,11 +1,14 @@
 # SMA Breakout Scanner
 
-Scans the S&P 500 for stocks whose **20-day SMA has broken out above the 50-day SMA**
-(a "golden cross"), and is built so the screening conditions can be changed without
-touching the scanning engine.
+Scans the S&P 500 **plus the 100 most-traded US ETFs** for symbols whose
+**20-day SMA has broken out above the 50-day SMA** (a "golden cross"), and is built
+so the screening conditions can be changed without touching the scanning engine.
+
+Results are ranked by **breakout-day volume vs its 20-day baseline** (highest
+conviction first) in every output form — console, CSV, and the HTML report.
 
 Data comes from **Alpaca Markets** (official `alpaca-py` SDK), which accepts many
-symbols per request — the full index costs a handful of HTTP calls.
+symbols per request — the full universe costs a handful of HTTP calls.
 
 ---
 
@@ -70,6 +73,62 @@ python3.11 main.py --filter sma_breakout:min_volume_ratio=1.5 --filter above_sma
 
 ---
 
+## Output ordering
+
+Matches are ranked by `volume_ratio` — **highest conviction first** — in the console
+table, the CSV, and the HTML report alike. The HTML report also highlights the
+ranked column, and its column headers stay clickable for ad-hoc re-sorting.
+
+Symbols with no volume metric (NaN or absent) sort **last** rather than being
+dropped, so a filter set that never emits `volume_ratio` still reports everything.
+
+```bash
+python3.11 main.py --sort-by spread_pct    # rank by SMA gap instead
+python3.11 main.py --sort-asc              # weakest conviction first
+python3.11 main.py --sort-by ""            # plain alphabetical
+```
+
+---
+
+## Universe
+
+The default universe is **S&P 500 + the 100 most-traded US ETFs** (~603 symbols).
+
+| `universe` | Contents |
+|---|---|
+| `both` | S&P 500 + most-traded ETFs (default) |
+| `sp500` | S&P 500 constituents only |
+| `etf` | Most-traded US ETFs only |
+| `file` | Your own symbol file (`symbols_file`) |
+
+```bash
+python3.11 main.py                      # both (default)
+python3.11 main.py --universe sp500     # stocks only
+python3.11 main.py --universe etf       # ETFs only
+```
+
+### The ETF list
+
+ETFs come from TradingView's
+[most-traded US ETFs](https://www.tradingview.com/markets/etfs/funds-most-traded/)
+table, which ranks by *dollar* volume (Price × Volume) — a better liquidity measure
+than raw share count, since a $5 fund trading 10M shares is less tradeable than a
+$500 fund trading 1M. The page is server-rendered, so no browser is needed.
+
+The list is cached to `data/most_traded_etfs.csv` **with a fetch timestamp**, and is
+re-scraped automatically once the cache is older than `etf_refresh_days` (7 days) —
+that satisfies "refresh every week" without a separate cron entry. Membership drifts
+slowly, so a failed refresh falls back to the stale cache with a warning instead of
+aborting the scan.
+
+```bash
+python3.11 main.py --etf-limit 50          # fewer ETFs
+python3.11 main.py --etf-refresh-days 1    # refresh daily instead
+python3.11 main.py --refresh-tickers       # force refresh now (both lists)
+```
+
+---
+
 ## Changing the filtering conditions
 
 Filters are selected by **name** from config, so conditions are data, not code.
@@ -115,10 +174,13 @@ python3.11 main.py --config scan.json --max-symbols 40   # quick smoke test
 
 | Key | Type | Meaning |
 |---|---|---|
-| `universe` | `"sp500"` \| `"file"` | where symbols come from |
+| `universe` | `"sp500"` \| `"etf"` \| `"both"` \| `"file"` | where symbols come from |
 | `symbols_file` | string \| null | symbol file, when `universe: "file"` |
 | `ticker_cache` | string | local cache for the scraped S&P 500 list |
-| `refresh_tickers` | bool | re-scrape the constituent list, ignore cache |
+| `etf_cache` | string | local cache for the ETF list |
+| `etf_limit` | int | how many most-traded ETFs to include |
+| `etf_refresh_days` | int | re-scrape the ETF list once cache is this old |
+| `refresh_tickers` | bool | force re-scrape every list, ignore cache |
 | `max_symbols` | int \| null | cap the universe (fast runs) |
 | `data_source` | string | `alpaca`, `yfinance`, `csv`, `synthetic` |
 | `source_kwargs` | object | extra constructor args for the source |
@@ -128,6 +190,8 @@ python3.11 main.py --config scan.json --max-symbols 40   # quick smoke test
 | `html_output` | string \| null | standalone HTML report path |
 | `show_failed` | bool | also list rejected symbols and why |
 | `verbose` | bool | progress log + fetch errors |
+| `sort_by` | string \| null | metric used to rank output (default `volume_ratio`) |
+| `sort_desc` | bool | `true` = highest first |
 
 `filters` is an ordered list; **all** must pass for a symbol to match, and
 evaluation short-circuits on the first failure. Each entry is
@@ -188,7 +252,7 @@ means naming it: `--filter sma_breakout --filter above_sma:period=200`.
 ```
 main.py                  CLI: flags -> config -> scan -> report
 sma_scanner/
-  config.py              ScanConfig - universe, source, and the filter list
+  config.py              ScanConfig - universe, source, filters, ranking
   data/                  pluggable sources behind one interface
     base.py              DataSource ABC + PriceFrame contract
     alpaca_source.py     Alpaca (SDK primary, REST fallback)
@@ -196,6 +260,7 @@ sma_scanner/
     csv_source.py        local cached CSVs
     synthetic_source.py  deterministic data for offline tests
     sp500.py             index membership (Wikipedia, cached)
+    etf_list.py          most-traded ETFs (TradingView, cached + timestamped)
   indicators/
     indicators.py        SMA/EMA/RSI/volume/crossover primitives
     context.py           per-symbol memoized indicator view
@@ -277,7 +342,11 @@ python3.11 -m unittest discover -s tests -v
 ```
 
 Covers SMA math, crossover detection (including stale-cross and reversal cases),
-filter gating, config round-trip, and an end-to-end scan against generated data.
+filter gating, volume metrics, result ranking, ETF parsing (rank order, de-duping,
+non-US filtering), ETF cache freshness and stale fallback, universe composition and
+de-duplication, config round-trip, and an end-to-end scan against generated data.
+
+44 tests, no network access required.
 
 ---
 
@@ -286,4 +355,10 @@ filter gating, config round-trip, and an end-to-end scan against generated data.
 - Signals are computed on the bars Alpaca returns; on a free (IEX) feed the current
   day's bar may still be forming. Run after the close for settled values.
 - `adjustment=split` is used by default so splits do not create fake crossovers.
+- The ETF list depends on TradingView's markup. If it changes, the scraper finds no
+  tickers and falls back to the cached list with a warning rather than silently
+  scanning a short universe.
+- Dollar-volume ranking means the ETF list can include leveraged/inverse funds
+  (e.g. TQQQ, SOXL). They are liquid, but they are not buy-and-hold instruments —
+  filter them out with `--filter min_price:...` style gates if you don't want them.
 - This is a screening tool, not investment advice.

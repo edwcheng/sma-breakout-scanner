@@ -27,10 +27,14 @@ DEFAULT_FILTERS: List[Dict[str, Any]] = [
 @dataclass
 class ScanConfig:
     # -- universe -------------------------------------------------------
-    universe: str = "sp500"  # "sp500" or "file"
+    #: "sp500" | "etf" | "both" | "file"
+    universe: str = "both"
     symbols_file: Optional[str] = None  # used when universe == "file"
     ticker_cache: str = "data/sp500_tickers.csv"
-    refresh_tickers: bool = False
+    etf_cache: str = "data/most_traded_etfs.csv"
+    etf_limit: int = 100  # how many most-traded ETFs to include
+    etf_refresh_days: int = 7  # re-scrape the ETF list once cache is older
+    refresh_tickers: bool = False  # force-refresh every list
     max_symbols: Optional[int] = None  # cap for quick test runs
 
     # -- data -----------------------------------------------------------
@@ -48,6 +52,11 @@ class ScanConfig:
     html_output: Optional[str] = None  # standalone HTML report
     show_failed: bool = False
     verbose: bool = False
+
+    #: Metric the outputs are ranked by. "volume_ratio" = breakout-day
+    #: volume vs its 20-day baseline, highest conviction first.
+    sort_by: Optional[str] = "volume_ratio"
+    sort_desc: bool = True
 
     # ------------------------------------------------------------------
     def build_filters(self) -> List[Filter]:
@@ -71,6 +80,9 @@ class ScanConfig:
             "universe": self.universe,
             "symbols_file": self.symbols_file,
             "ticker_cache": self.ticker_cache,
+            "etf_cache": self.etf_cache,
+            "etf_limit": self.etf_limit,
+            "etf_refresh_days": self.etf_refresh_days,
             "refresh_tickers": self.refresh_tickers,
             "max_symbols": self.max_symbols,
             "data_source": self.data_source,
@@ -81,6 +93,8 @@ class ScanConfig:
             "html_output": self.html_output,
             "show_failed": self.show_failed,
             "verbose": self.verbose,
+            "sort_by": self.sort_by,
+            "sort_desc": self.sort_desc,
         }
 
     def save(self, path: str | os.PathLike) -> None:

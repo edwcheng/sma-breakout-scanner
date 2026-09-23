@@ -95,7 +95,14 @@ def print_summary(res: ScanResult, *, show_failed: bool = False, stream=sys.stdo
                 f"{ratio_s:>8}\n"
             )
         w("\n")
-        w("  VOLxAVG = breakout-day volume / average volume of the 20 bars before it\n\n")
+        w("  VOLxAVG = breakout-day volume / average volume of the 20 bars before it\n")
+        if res.sort_by:
+            w(
+                f"  Sorted by {res.sort_by} "
+                f"{'descending' if res.sort_desc else 'ascending'}\n\n"
+            )
+        else:
+            w("\n")
 
     if show_failed:
         failed = res.failed_rows()

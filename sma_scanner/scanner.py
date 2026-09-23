@@ -13,7 +13,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .config import ScanConfig
-from .data import PriceFrame, build_source, fetch_sp500_tickers
+from .data import (
+    PriceFrame,
+    build_source,
+    fetch_most_traded_etfs,
+    fetch_sp500_tickers,
+)
 from .filters import Filter, FilterResult
 from .indicators import IndicatorContext, InsufficientHistory
 
@@ -46,6 +51,20 @@ class SymbolResult:
         return self.skipped or ""
 
 
+def _rank_value(sr: "SymbolResult", key: Optional[str]) -> Optional[float]:
+    """Numeric rank for one symbol, or None when the metric is missing."""
+    if not key:
+        return None
+    value = sr.metrics.get(key)
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f  # NaN -> missing
+
+
 @dataclass
 class ScanResult:
     """Aggregate outcome of a scan."""
@@ -56,9 +75,30 @@ class ScanResult:
     data_source: str = ""
     filters_used: List[str] = field(default_factory=list)
 
+    #: Ranking applied to `matches` (and therefore to every output form).
+    sort_by: Optional[str] = "volume_ratio"
+    sort_desc: bool = True
+
     @property
     def matches(self) -> List[SymbolResult]:
-        return [r for r in self.results if r.passed]
+        """Passing symbols, ranked by `sort_by` (highest conviction first).
+
+        Symbols missing the metric sort last instead of being dropped, so a
+        filter set that never emits `volume_ratio` still returns everything.
+        Ties break on symbol for reproducible output.
+        """
+        found = [r for r in self.results if r.passed]
+        if not self.sort_by:
+            return sorted(found, key=lambda r: r.symbol)
+        missing = float("inf")
+
+        def key(sr: SymbolResult):
+            v = _rank_value(sr, self.sort_by)
+            if v is None:
+                return (missing, sr.symbol)
+            return ((-v if self.sort_desc else v), sr.symbol)
+
+        return sorted(found, key=key)
 
     @property
     def evaluated(self) -> int:
@@ -110,16 +150,37 @@ class Scanner:
 
     # -- universe -------------------------------------------------------
     def resolve_universe(self) -> List[str]:
+        """Build the symbol list: S&P 500, most-traded ETFs, or both.
+
+        An explicit `symbols_file` always wins, so a custom list can be
+        scanned without touching any of the scrapers.
+        """
         cfg = self.config
         if cfg.universe == "file" or cfg.symbols_file:
             if not cfg.symbols_file:
                 raise ValueError("universe='file' requires symbols_file")
             symbols = fetch_sp500_tickers(symbols_file=cfg.symbols_file)
+        elif cfg.universe in {"sp500", "etf", "both"}:
+            symbols = []
+            if cfg.universe in {"sp500", "both"}:
+                symbols += fetch_sp500_tickers(
+                    refresh=cfg.refresh_tickers, cache_path=cfg.ticker_cache
+                )
+            if cfg.universe in {"etf", "both"}:
+                symbols += fetch_most_traded_etfs(
+                    refresh=cfg.refresh_tickers,
+                    cache_path=cfg.etf_cache,
+                    limit=cfg.etf_limit,
+                    refresh_days=cfg.etf_refresh_days,
+                    on_warning=self.progress,
+                )
+            # De-dupe while keeping order (an ETF is never an S&P 500 member,
+            # but a stale cache or an edited file could overlap).
+            symbols = list(dict.fromkeys(symbols))
         else:
-            if cfg.universe != "sp500":
-                raise ValueError(f"Unknown universe {cfg.universe!r}")
-            symbols = fetch_sp500_tickers(
-                refresh=cfg.refresh_tickers, cache_path=cfg.ticker_cache
+            raise ValueError(
+                f"Unknown universe {cfg.universe!r} "
+                "(expected: sp500, etf, both, file)"
             )
         if cfg.max_symbols:
             symbols = symbols[: cfg.max_symbols]
@@ -139,6 +200,8 @@ class Scanner:
         result = ScanResult(
             universe_size=len(symbols),
             filters_used=[type(f).name for f in self.filters],
+            sort_by=self.config.sort_by,
+            sort_desc=self.config.sort_desc,
         )
         if not symbols:
             return result

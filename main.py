@@ -122,11 +122,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-config", help="write the effective config to PATH and exit")
 
     # universe
-    p.add_argument("--universe", choices=["sp500", "file"], help="symbol universe")
+    p.add_argument(
+        "--universe",
+        choices=["sp500", "etf", "both", "file"],
+        help="symbol universe (default: both = S&P 500 + most-traded ETFs)",
+    )
     p.add_argument("--symbols-file", help="file of symbols (CSV or newline separated)")
     p.add_argument("--symbols", help="explicit comma-separated symbols (overrides universe)")
     p.add_argument("--max-symbols", type=int, help="cap the universe (quick runs)")
-    p.add_argument("--refresh-tickers", action="store_true", help="re-scrape the S&P 500 list")
+    p.add_argument("--etf-limit", type=int, help="how many most-traded ETFs (default 100)")
+    p.add_argument("--etf-refresh-days", type=int,
+                   help="re-scrape the ETF list once the cache is this old (default 7)")
+    p.add_argument("--refresh-tickers", action="store_true",
+                   help="force re-scrape of the S&P 500 and ETF lists")
 
     # data source
     p.add_argument(
@@ -149,6 +157,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="filter to apply (repeatable). Replaces the default filter set.")
 
     # output
+    p.add_argument("--sort-by", metavar="METRIC",
+                   help="rank output by this metric (default: volume_ratio)")
+    p.add_argument("--sort-asc", action="store_true", help="sort ascending instead")
     p.add_argument("-o", "--output", help="write matches to this CSV path")
     p.add_argument("--html", help="also render a standalone HTML report at this path")
     p.add_argument("--show-failed", action="store_true", help="also list rejected symbols")
@@ -205,12 +216,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         symbols_file=args.symbols_file,
         refresh_tickers=True if args.refresh_tickers else None,
         max_symbols=args.max_symbols,
+        etf_limit=args.etf_limit,
+        etf_refresh_days=args.etf_refresh_days,
         data_source=args.source,
         history_bars=args.history_bars,
         output_csv=args.output,
         html_output=args.html,
         show_failed=True if args.show_failed else None,
         verbose=True if args.verbose else None,
+        sort_by=args.sort_by,
+        sort_desc=False if args.sort_asc else None,
     )
     if args.source_kw:
         cfg.source_kwargs.update(parse_kv_pairs(args.source_kw))

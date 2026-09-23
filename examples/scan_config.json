@@ -1,6 +1,12 @@
 {
-  "universe": "sp500",
+  "universe": "both",
+  "symbols_file": null,
   "ticker_cache": "data/sp500_tickers.csv",
+  "etf_cache": "data/most_traded_etfs.csv",
+  "etf_limit": 100,
+  "etf_refresh_days": 7,
+  "refresh_tickers": false,
+  "max_symbols": null,
   "data_source": "alpaca",
   "source_kwargs": {},
   "history_bars": 400,
@@ -31,6 +37,9 @@
     }
   ],
   "output_csv": "results/breakouts.csv",
+  "html_output": "web/index.html",
   "show_failed": false,
-  "verbose": false
+  "verbose": false,
+  "sort_by": "volume_ratio",
+  "sort_desc": true
 }

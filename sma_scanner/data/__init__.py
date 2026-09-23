@@ -11,6 +11,7 @@ from .yfinance_source import YFinanceSource
 from .csv_source import CsvSource
 from .synthetic_source import SyntheticSource
 from .sp500 import fetch_sp500_tickers
+from .etf_list import fetch_most_traded_etfs
 
 #: Registry used by config to instantiate a source by name.
 SOURCE_REGISTRY = {
@@ -43,6 +44,7 @@ __all__ = [
     "CsvSource",
     "SyntheticSource",
     "fetch_sp500_tickers",
+    "fetch_most_traded_etfs",
     "SOURCE_REGISTRY",
     "build_source",
 ]
