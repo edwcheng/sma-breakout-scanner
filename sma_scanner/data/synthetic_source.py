@@ -4,6 +4,11 @@ Lets us prove the indicator + filter logic is correct without hitting a
 live API (or burning rate limit). `breakout_symbols` get an engineered
 "V" recovery so their 20-day SMA crosses above the 50-day SMA near the
 end of the series; everything else is a plain random walk.
+
+The dip is deliberately *localized* rather than a series-long decline: the
+symbols still spend most of their life around `base_price`, so the price
+after the recovery sits above the 200-day average and survives the
+default trend gate instead of only working when that gate is removed.
 """
 
 from __future__ import annotations
@@ -28,9 +33,10 @@ class SyntheticSource(DataSource):
         base_price: float = 100.0,
         vol: float = 0.012,
         seed: int = 7,
-        trough_offset: int = 12,
-        recovery_drift: float = 0.045,
-        decline_drift: float = -0.006,
+        trough_offset: int = 15,
+        recovery_drift: float = 0.05,
+        decline_drift: float = -0.008,
+        dip_bars: int = 80,
         base_volume: int = 2_000_000,
         breakout_symbols: Optional[Iterable[str]] = None,
     ) -> None:
@@ -42,6 +48,7 @@ class SyntheticSource(DataSource):
         self.trough_offset = trough_offset
         self.recovery_drift = recovery_drift
         self.decline_drift = decline_drift
+        self.dip_bars = dip_bars
         self.base_volume = base_volume
         self.breakout_symbols = self._as_symbol_set(breakout_symbols)
 
@@ -52,19 +59,25 @@ class SyntheticSource(DataSource):
         return self.base_price * np.exp(np.cumsum(shocks))
 
     def _breakout_walk(self, rng: np.random.Generator) -> np.ndarray:
-        """Decline into a trough, then a sharp recovery (golden cross).
+        """Flat, then a dip, then a sharp recovery (golden cross).
 
-        The decline keeps SMA20 below SMA50; the steep recovery pulls
-        SMA20 back up through SMA50 a few bars before the series ends.
+        The dip holds SMA20 below SMA50; the steep recovery pulls it back
+        up through SMA50 a few bars before the series ends.
+
+        The dip is kept short on purpose. A decline spanning the whole
+        series drags the 200-day average down to meet the recovering price,
+        so the symbol ends up *below* its own long-term trend and gets
+        rejected by the default above_sma gate - the engineered breakout
+        then only shows up if that gate is removed.
         """
         n = self.days
-        trough_at = n - self.trough_offset
-        drift = np.empty(n)
-        drift[:trough_at] = self.decline_drift
+        trough_at = max(1, n - self.trough_offset)
+        dip_start = max(0, trough_at - self.dip_bars)
+        drift = np.zeros(n)  # flat baseline: most of the life near base_price
+        drift[dip_start:trough_at] = self.decline_drift
         drift[trough_at:] = self.recovery_drift
         shocks = rng.normal(0.0, self.vol * 0.6, n)
-        path = self.base_price * np.exp(np.cumsum(drift + shocks))
-        return path
+        return self.base_price * np.exp(np.cumsum(drift + shocks))
 
     def _to_frame(self, symbol: str, closes: np.ndarray, rng) -> PriceFrame:
         idx = pd.date_range(end=pd.Timestamp.today().normalize(), periods=len(closes), freq="D")
