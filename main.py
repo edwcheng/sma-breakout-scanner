@@ -38,6 +38,11 @@ from sma_scanner.reporter import (  # noqa: E402
     write_csv,
 )
 from sma_scanner.scanner import Scanner  # noqa: E402
+from sma_scanner.summary import (  # noqa: E402
+    build_summary,
+    format_health_line,
+    write_summary,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -162,6 +167,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sort-asc", action="store_true", help="sort ascending instead")
     p.add_argument("-o", "--output", help="write matches to this CSV path")
     p.add_argument("--html", help="also render a standalone HTML report at this path")
+    p.add_argument("--summary-json", metavar="PATH",
+                   help="write machine-readable run health (counts, fetch errors, "
+                        "cache ages) to this path - for gating automated runs")
     p.add_argument("--show-failed", action="store_true", help="also list rejected symbols")
     p.add_argument("-v", "--verbose", action="store_true", help="progress + fetch errors")
 
@@ -222,6 +230,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         history_bars=args.history_bars,
         output_csv=args.output,
         html_output=args.html,
+        summary_json=args.summary_json,
         show_failed=True if args.show_failed else None,
         verbose=True if args.verbose else None,
         sort_by=args.sort_by,
@@ -294,6 +303,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "output is in input order, not ranked by it.",
                 file=sys.stderr,
             )
+
+    # Printed unconditionally, not just under -v: this is the line that says
+    # whether everything above it is trustworthy.
+    summary = build_summary(result, cfg, explicit_symbols=bool(args.symbols))
+    print(format_health_line(summary))
+    if cfg.summary_json:
+        write_summary(summary, cfg.summary_json)
+        print(f"Wrote run summary to {cfg.summary_json}")
 
     if cfg.output_csv:
         path = cfg.output_csv

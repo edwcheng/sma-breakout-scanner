@@ -7,11 +7,12 @@ Run:  python3.11 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -44,6 +45,14 @@ from sma_scanner.indicators import (  # noqa: E402
 )
 from sma_scanner.reporter import print_summary  # noqa: E402
 from sma_scanner.scanner import ScanResult, Scanner, SymbolResult  # noqa: E402
+from sma_scanner.summary import (  # noqa: E402
+    build_summary,
+    cache_health,
+    check,
+    format_health_line,
+    format_markdown,
+)
+from sma_scanner.summary import main as summary_main  # noqa: E402
 
 
 def make_frame(symbol: str, closes, volume=1_000_000.0) -> PriceFrame:
@@ -902,6 +911,197 @@ class TestReportLabels(unittest.TestCase):
             header.split(),
             ["SYMBOL", "PRICE", "SMA50", "SMA200", "SPREAD%", "CROSSED", "AGO", "VOLxAVG"],
         )
+
+
+class TestRunHealthSummary(unittest.TestCase):
+    """The gate that stops an automated run publishing a useless report."""
+
+    def _healthy(self) -> dict:
+        return {
+            "universe_size": 603,
+            "evaluated": 600,
+            "skipped": 3,
+            "matches": 5,
+            "fetch_errors": 3,
+            "fetch_error_rate": 0.005,
+            "fetch_error_symbols": ["ZZZ"],
+            "caches": {},
+        }
+
+    def test_healthy_run_reports_nothing(self):
+        self.assertEqual(check(self._healthy()), [])
+
+    def test_total_data_outage_is_refused(self):
+        """Every symbol failing to load is not 'zero signals today'."""
+        summary = {
+            "universe_size": 603,
+            "evaluated": 0,
+            "skipped": 0,
+            "matches": 0,
+            "fetch_errors": 603,
+            "fetch_error_rate": 1.0,
+            "fetch_error_symbols": ["AAPL"],
+            "caches": {},
+        }
+        problems = check(summary)
+        self.assertTrue(problems)
+        self.assertTrue(any("fetch error rate" in p for p in problems))
+        self.assertTrue(any("evaluated" in p for p in problems))
+
+    def test_truncated_universe_is_refused(self):
+        """A failed S&P scrape leaves an ETF-only universe - too small to trust."""
+        problems = check({**self._healthy(), "universe_size": 100, "evaluated": 100})
+        self.assertTrue(any("universe 100" in p for p in problems))
+
+    def test_partial_symbol_failures_are_tolerated(self):
+        """A handful of bad symbols is normal and must not block publishing."""
+        self.assertEqual(check({**self._healthy(), "fetch_errors": 10,
+                                "fetch_error_rate": 0.016}), [])
+
+    def test_stale_cache_is_refused(self):
+        summary = {
+            **self._healthy(),
+            "caches": {"etfs": {"stale": True, "age_days": 9.2, "exists": True}},
+        }
+        problems = check(summary)
+        self.assertTrue(any("etfs cache" in p and "9.2" in p for p in problems))
+
+    def test_missing_cache_is_refused(self):
+        summary = {
+            **self._healthy(),
+            "caches": {"tickers": {"stale": True, "age_days": None, "exists": False}},
+        }
+        self.assertTrue(any("missing" in p for p in check(summary)))
+
+    # -- cache_health ---------------------------------------------------
+    def test_cache_health_missing_file_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            info = cache_health(os.path.join(tmp, "nope.csv"),
+                                now=datetime.now(timezone.utc), max_age_days=7)
+        self.assertFalse(info["exists"])
+        self.assertTrue(info["stale"])
+        self.assertIsNone(info["age_days"])
+
+    def test_cache_health_age_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "etfs.csv")
+            Path(path).write_text("Symbol\nSPY\n", encoding="utf-8")
+            now = datetime.now(timezone.utc)
+
+            fresh = cache_health(path, now=now, max_age_days=7)
+            self.assertFalse(fresh["stale"])
+
+            # Backdate the file past the refresh window: this is exactly what a
+            # failed TradingView scrape looks like - the old list, still in use.
+            old = (now - timedelta(days=9)).timestamp()
+            os.utime(path, (old, old))
+            self.assertTrue(cache_health(path, now=now, max_age_days=7)["stale"])
+
+    def test_cache_health_without_threshold_does_not_judge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "sp500.csv")
+            Path(path).write_text("Symbol\nAAPL\n", encoding="utf-8")
+            info = cache_health(path, now=datetime.now(timezone.utc))
+        self.assertIsNone(info["stale"])
+        self.assertIsNotNone(info["age_days"])
+
+    # -- build_summary --------------------------------------------------
+    def _result(self, **kwargs) -> ScanResult:
+        res = ScanResult(data_source="alpaca", universe_size=2)
+        sr = SymbolResult(symbol="AAA")
+        sr.metrics["volume_ratio"] = 1.4
+        res.results.append(sr)
+        res.fetch_errors = kwargs.get("fetch_errors", {})
+        return res
+
+    def test_summary_reports_counts_and_errors(self):
+        res = self._result(fetch_errors={"BBB": "timeout"})
+        summary = build_summary(res, ScanConfig(universe="both"),
+                                now=datetime(2024, 6, 1, tzinfo=timezone.utc))
+        self.assertEqual(summary["universe_size"], 2)
+        self.assertEqual(summary["evaluated"], 1)
+        self.assertEqual(summary["matches"], 1)
+        self.assertEqual(summary["fetch_errors"], 1)
+        self.assertEqual(summary["fetch_error_rate"], 0.5)
+        self.assertEqual(summary["fetch_error_symbols"], ["BBB"])
+        self.assertEqual(summary["universe_source"], "both")
+        self.assertEqual(set(summary["caches"]), {"tickers", "etfs"})
+
+    def test_explicit_symbols_skips_cache_judgement(self):
+        """--symbols reads no ticker list, so a missing cache means nothing."""
+        summary = build_summary(self._result(), ScanConfig(universe="both"),
+                                explicit_symbols=True)
+        self.assertEqual(summary["caches"], {})
+        self.assertEqual(summary["universe_source"], "explicit")
+
+    def test_sp500_only_run_ignores_the_etf_cache(self):
+        summary = build_summary(self._result(), ScanConfig(universe="sp500"))
+        self.assertEqual(set(summary["caches"]), {"tickers"})
+
+    def test_etf_staleness_uses_the_configured_refresh_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = ScanConfig(universe="etf",
+                             etf_cache=os.path.join(tmp, "etfs.csv"),
+                             etf_refresh_days=3)
+            Path(cfg.etf_cache).write_text("Symbol\nSPY\n", encoding="utf-8")
+            old = (datetime.now(timezone.utc) - timedelta(days=5)).timestamp()
+            os.utime(cfg.etf_cache, (old, old))
+            summary = build_summary(self._result(), cfg)
+        self.assertEqual(summary["caches"]["etfs"]["max_age_days"], 3)
+        self.assertTrue(summary["caches"]["etfs"]["stale"])
+
+    def test_health_line_is_one_line(self):
+        line = format_health_line(build_summary(self._result(), ScanConfig()))
+        self.assertTrue(line.startswith("health: "))
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertIn("fetch_errors=0", line)
+
+    def test_markdown_table_lists_the_counters(self):
+        md = format_markdown(build_summary(self._result(), ScanConfig()))
+        self.assertIn("| Universe | 2 |", md)
+        self.assertIn("| Matches | 1 |", md)
+
+    # -- the CLI the schedulers call ------------------------------------
+    def test_cli_exit_codes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            good = os.path.join(tmp, "good.json")
+            Path(good).write_text(json.dumps(self._healthy()), encoding="utf-8")
+            with mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(summary_main([good, "--min-universe", "500"]), 0)
+
+            bad = os.path.join(tmp, "bad.json")
+            Path(bad).write_text(json.dumps({**self._healthy(),
+                                             "fetch_error_rate": 0.9,
+                                             "fetch_errors": 543}),
+                                 encoding="utf-8")
+            with mock.patch("sys.stdout", io.StringIO()), \
+                    mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(summary_main([bad]), 1)
+
+    def test_cli_missing_summary_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "absent.json")
+            with mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(summary_main([missing]), 1)
+
+    def test_cli_writes_the_markdown_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s.json")
+            Path(path).write_text(json.dumps(self._healthy()), encoding="utf-8")
+            md = os.path.join(tmp, "step-summary.md")
+            with mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(summary_main([path, "--markdown", md]), 0)
+            self.assertIn("Run health", Path(md).read_text(encoding="utf-8"))
+
+    def test_cli_survives_an_unwritable_markdown_path(self):
+        """A missing run-summary file must not turn a healthy run into a failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s.json")
+            Path(path).write_text(json.dumps(self._healthy()), encoding="utf-8")
+            with mock.patch("sys.stdout", io.StringIO()), \
+                    mock.patch("sys.stderr", io.StringIO()):
+                rc = summary_main([path, "--markdown", os.path.join(tmp, "nodir", "x.md")])
+            self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":

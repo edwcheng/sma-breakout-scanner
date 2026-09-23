@@ -59,6 +59,8 @@ class ScanConfig:
     # -- output ---------------------------------------------------------
     output_csv: Optional[str] = None
     html_output: Optional[str] = None  # standalone HTML report
+    #: Machine-readable run health, for gate-keeping automated runs
+    summary_json: Optional[str] = None
     show_failed: bool = False
     verbose: bool = False
 
@@ -110,6 +112,7 @@ class ScanConfig:
             "filters": self.filters,
             "output_csv": self.output_csv,
             "html_output": self.html_output,
+            "summary_json": self.summary_json,
             "show_failed": self.show_failed,
             "verbose": self.verbose,
             "sort_by": self.sort_by,
