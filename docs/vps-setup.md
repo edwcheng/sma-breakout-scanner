@@ -54,6 +54,13 @@ python3 -m venv venv
 `pandas`, `numpy` and `lxml` all ship manylinux wheels, so no compiler or
 `python3-dev` is needed.
 
+Skipping the venv: if the system Python already has everything
+(`python3 -c "import pandas,numpy,lxml,requests,yaml,alpaca,yfinance"` prints
+OK), step 3 can be skipped. `scripts/run_scan.sh` defaults to
+`$REPO_DIR/venv/bin/python`, so every call below then needs an override:
+`PY=/usr/bin/python3 bash scripts/run_scan.sh ...`, and the step 8 cron line
+needs the same `PY=/usr/bin/python3` prefix.
+
 ## 4. Credentials
 
 ```bash
@@ -91,6 +98,8 @@ mkdir -p results site
   --html site/index.html \
   --summary-json results/summary.json
 ```
+
+Without a venv, replace `./venv/bin/python` with `python3`.
 
 Takes about 25 seconds. What to look for at the end:
 
@@ -151,6 +160,9 @@ containing only the report:
 bash scripts/run_scan.sh
 ```
 
+Without a venv, prefix both with `PY=/usr/bin/python3`, e.g.
+`PY=/usr/bin/python3 bash scripts/run_scan.sh --no-publish`.
+
 Now turn on Pages: **repo → Settings → Pages → Source: Deploy from a branch →
 `gh-pages` / `/ (root)`**. The report appears at
 `https://edwcheng.github.io/sma-breakout-scanner/` within a minute or two.
@@ -181,6 +193,13 @@ Add (box on Asia/Shanghai):
 
 If you left the box on UTC, use `0 1 * * *` instead.
 
+Without a venv, prefix the command so the script does not look for
+`venv/bin/python`:
+
+```cron
+0 9 * * * PY=/usr/bin/python3 /home/ubuntu/projects/sma-breakout-scanner/scripts/run_scan.sh >> /var/log/sma-scan.log 2>&1
+```
+
 Optional - failure notifications. Set it in the crontab, since cron does not
 read your shell profile:
 
@@ -206,10 +225,21 @@ sudo tee /etc/logrotate.d/sma-scan >/dev/null <<'EOF'
     missingok
     notifempty
     create 0640 ubuntu adm
+    su ubuntu adm
 }
 EOF
 sudo logrotate -d /etc/logrotate.d/sma-scan    # dry run
 ```
+
+`su ubuntu adm` is required on current Ubuntu: `/var/log` is group-writable
+(`775 root:syslog`), and logrotate 3.19+ refuses to rotate without it
+(`error: skipping ... because parent directory has insecure permissions`).
+If you also run the monthly housekeeping script below, list both logs on the
+first line: `/var/log/sma-scan.log /var/log/sma-housekeeping.log {`.
+
+Rotation lands next to the live log: `/var/log/sma-scan.log.1` (yesterday,
+plain text due to `delaycompress`), then `.2.gz` ... `.14.gz`. So `daily` +
+`rotate 14` keeps roughly 14 days of history.
 
 ## 10. Verify the schedule fired
 
@@ -243,6 +273,22 @@ which threshold failed.
 ## Maintenance
 
 - Update dependencies occasionally: `./venv/bin/pip install -r requirements.txt --upgrade`
+  (without a venv, this is a system-wide upgrade - use with care).
+- Monthly housekeeping: `scripts/monthly_housekeeping.sh` checks the log file,
+  logrotate config, disk use, `.env` perms, cron entry, report freshness, git
+  cleanliness, and security updates. Schedule it for the 1st of each month,
+  after the daily scan:
+
+  ```bash
+  sudo touch /var/log/sma-housekeeping.log
+  sudo chown ubuntu:adm /var/log/sma-housekeeping.log
+  crontab -e
+  ```
+
+  ```cron
+  0 2 1 * * /home/ubuntu/projects/sma-breakout-scanner/scripts/monthly_housekeeping.sh >> /var/log/sma-housekeeping.log 2>&1
+  ```
+
 - Disk does not grow: the CSV and HTML are overwritten each run, and logs rotate.
 - If the Alpaca key is rotated, update `.env`. Nothing else changes.
 - `sudo apt install unattended-upgrades` if the image does not already have it.
